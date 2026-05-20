@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: detector-scenario-tool
+Version: 0.0.0
+Summary: Desktop UI tool for detector scenario authoring
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: PySide6<7,>=6.7
+
+# detector-scenario-tool
+
+Локальное desktop-приложение на PySide6 для редактирования циклограмм работы детектора.
