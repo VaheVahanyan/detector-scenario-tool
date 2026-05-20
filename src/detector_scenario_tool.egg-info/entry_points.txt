@@ -1,2 +1,0 @@
-[console_scripts]
-detector-scenario-tool = detector_scenario_tool.app.main:main
