@@ -1,8 +1,14 @@
 .idea/
-tests
-*.txt
-*.c
-*.cpp
-*.h
-*.hpp
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
 src/detector_scenario_tool.egg-info/
+
+# Generated C output from codegen/scenario_c_generator.py.
+# Keep these narrow: a blanket *.c / *.h / *.txt also hides fixtures and requirements files.
+generated/
+scenario_generated.c
+scenario_generated.h
+scenario_generated.meta.txt
+scenario_runtime_contract.txt

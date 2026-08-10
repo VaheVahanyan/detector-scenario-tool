@@ -1,8 +1,20 @@
+"""Send defaults and the responses a message is expected to produce.
+
+Both are derived from the message definitions: `MessageDef.ack` decides whether an acknowledgement
+is expected at all, `MessageDef.follow_up` lists the telemetry messages that follow it.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from detector_scenario_tool.domain.scenario import AckPolicy
+from detector_scenario_tool.protocol import registry
+from detector_scenario_tool.protocol.fields import AckBehaviour, ExpectedResponse
+
+DEFAULT_ACK_TIMEOUT_MS = 1000
+#: §5.4 of the CAN protocol: at least three retransmissions on a UniCAN error.
+DEFAULT_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -23,149 +35,54 @@ class ExpectedResponseSpec:
     is_ack: bool = False
     bind_to_previous_ku: bool = False
     require_ack_ok: bool = False
+    guaranteed: bool = True
 
 
-_SEND_DEFAULTS: dict[tuple[str, int], SendDefaults] = {
-    ("KU", 0x0000): SendDefaults(AckPolicy.NONE, None, 1, 0, False, False),
-    ("KU", 0x0001): SendDefaults(AckPolicy.NONE, None, 1, 0, False, False),
-
-    ("KU", 0x0002): SendDefaults(AckPolicy.EXPECT_ACK, 1000, 3, 0, True, False),
-    ("KU", 0x0003): SendDefaults(AckPolicy.EXPECT_ACK, 1000, 3, 0, True, False),
-    ("KU", 0x0004): SendDefaults(AckPolicy.EXPECT_ACK, 1000, 3, 0, True, False),
-    ("KU", 0x0005): SendDefaults(AckPolicy.EXPECT_ACK, 1000, 3, 0, True, False),
-    ("KU", 0x0006): SendDefaults(AckPolicy.EXPECT_ACK, 1000, 3, 0, True, False),
-    ("KU", 0x0007): SendDefaults(AckPolicy.EXPECT_ACK, 1000, 3, 0, True, False),
-    ("KU", 0x0008): SendDefaults(AckPolicy.EXPECT_ACK, 1000, 3, 0, True, False),
-    ("KU", 0x0009): SendDefaults(AckPolicy.EXPECT_ACK, 1000, 3, 0, True, False),
-    ("KU", 0x000A): SendDefaults(AckPolicy.EXPECT_ACK, 1000, 3, 0, True, False),
-    ("KU", 0x000B): SendDefaults(AckPolicy.EXPECT_ACK, 1000, 3, 0, True, False),
-    ("KU", 0x000C): SendDefaults(AckPolicy.EXPECT_ACK, 1000, 3, 0, True, False),
-
-    ("KT", 0x0100): SendDefaults(AckPolicy.NONE, None, 1, 0, False, False),
-    ("KT", 0x0101): SendDefaults(AckPolicy.NONE, None, 1, 0, False, False),
-    ("KT", 0x0102): SendDefaults(AckPolicy.NONE, None, 1, 0, False, False),
-    ("KT", 0x0103): SendDefaults(AckPolicy.NONE, None, 1, 0, False, False),
-}
-
-_EXPECTED_RESPONSES: dict[tuple[str, int], list[ExpectedResponseSpec]] = {
-    # CMD_TELEM_REQ -> ACK + Telemetry
-    ("KU", 0x0000): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-        ExpectedResponseSpec("TS", 0x0202, timeout_ms=1000, is_ack=False),
-    ],
-
-    # CMD_STATUS_REQ -> ACK + Status
-    ("KU", 0x0001): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-        ExpectedResponseSpec("TS", 0x0200, timeout_ms=1000, is_ack=False),
-    ],
-
-    # CMD_SET_TIME -> ACK
-    ("KU", 0x0002): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-    ],
-
-    # CMD_OBSERVE_START -> ACK + Status
-    ("KU", 0x0003): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-        ExpectedResponseSpec("TS", 0x0200, timeout_ms=1000, is_ack=False),
-    ],
-
-    # CMD_OBSERVE_CTRL -> ACK
-    ("KU", 0x0004): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-    ],
-
-    # CMD_DUTY -> ACK
-    # Статус там не всегда гарантирован ("при выходе также"), поэтому автоматически не вставляем.
-    ("KU", 0x0005): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-    ],
-
-    # CMD_DUMP -> ACK + Status
-    ("KU", 0x0006): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-        ExpectedResponseSpec("TS", 0x0200, timeout_ms=1000, is_ack=False),
-    ],
-
-    # CMD_SET_CFG -> ACK
-    ("KU", 0x0007): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-    ],
-
-    # CMD_ERASE -> ACK + Status
-    ("KU", 0x0008): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-        ExpectedResponseSpec("TS", 0x0200, timeout_ms=1000, is_ack=False),
-    ],
-
-    # CMD_TEST -> ACK + Status
-    ("KU", 0x0009): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-        ExpectedResponseSpec("TS", 0x0200, timeout_ms=1000, is_ack=False),
-    ],
-
-    # CMD_TEST_RESULT -> ACK + Test results
-    ("KU", 0x000A): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-        ExpectedResponseSpec("TS", 0x0203, timeout_ms=2000, is_ack=False),
-    ],
-
-    # CMD_SHUTDOWN -> ACK + Status
-    ("KU", 0x000B): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-        ExpectedResponseSpec("TS", 0x0200, timeout_ms=1000, is_ack=False),
-    ],
-
-    # CMD_RESET_ALARM -> ACK
-    ("KU", 0x000C): [
-        ExpectedResponseSpec(
-            "TS", 0x0201, timeout_ms=1000, is_ack=True,
-            bind_to_previous_ku=True, require_ack_ok=True,
-        ),
-    ],
-}
+def _to_spec(response: ExpectedResponse) -> ExpectedResponseSpec:
+    return ExpectedResponseSpec(
+        category=response.category,
+        msg_id=response.msg_id,
+        timeout_ms=response.timeout_ms,
+        is_ack=response.is_ack,
+        bind_to_previous_ku=response.bind_to_previous_ku,
+        require_ack_ok=response.require_ack_ok,
+        guaranteed=response.guaranteed,
+    )
 
 
 def get_send_defaults(category: str, msg_id: int) -> SendDefaults | None:
-    return _SEND_DEFAULTS.get((category, msg_id))
+    spec = registry.find(category, msg_id)
+    if spec is None or not spec.sendable:
+        return None
+
+    if spec.ack is AckBehaviour.NONE:
+        # Телеметрия: «на КТ ТС «Квитанция» не выдается» (§2.3).
+        return SendDefaults(AckPolicy.NONE, None, 1, 0, False, False)
+
+    if spec.ack is AckBehaviour.ACK_MAY_BE_SUPPRESSED:
+        # CMD_SET_TIME_SPUTNIKS may be ignored entirely, so a missing acknowledgement is not a
+        # failure and must not be retried.
+        return SendDefaults(
+            AckPolicy.OPTIONAL_ACK, DEFAULT_ACK_TIMEOUT_MS, 1, 0, False, False
+        )
+
+    return SendDefaults(
+        AckPolicy.EXPECT_ACK,
+        DEFAULT_ACK_TIMEOUT_MS,
+        DEFAULT_ATTEMPTS,
+        0,
+        True,
+        False,
+    )
 
 
 def get_expected_responses(category: str, msg_id: int) -> list[ExpectedResponseSpec]:
-    return list(_EXPECTED_RESPONSES.get((category, msg_id), []))
+    spec = registry.find(category, msg_id)
+    if spec is None:
+        return []
+    return [_to_spec(response) for response in spec.follow_up]
+
+
+def get_guaranteed_responses(category: str, msg_id: int) -> list[ExpectedResponseSpec]:
+    """Only the responses the protocol always produces, for auto-inserting scenario steps."""
+    return [r for r in get_expected_responses(category, msg_id) if r.guaranteed]

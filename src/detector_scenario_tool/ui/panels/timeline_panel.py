@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import QRectF, Qt, QPointF, Signal
 from PySide6.QtGui import QBrush, QPen, QColor, QFontMetrics, QPolygonF, QPainter
 from PySide6.QtWidgets import (
@@ -16,6 +18,61 @@ from PySide6.QtWidgets import (
 from detector_scenario_tool.domain.scenario import ScenarioDocument
 from detector_scenario_tool.domain.timeline import TimelineItem, build_timeline
 from detector_scenario_tool.i18n import tr
+
+
+# Item data slots: the status, lane and rendering mode an item was drawn for, so repainting does
+# not have to guess them back out of the pen colour.
+_STATUS_ROLE = 0
+_LANE_ROLE = 1
+_NARROW_ROLE = 2
+
+LEFT_MARGIN = 20
+RIGHT_MARGIN = 40
+TOP_MARGIN = 10
+BOTTOM_MARGIN = 12
+
+BLOCK_H = 30
+WAIT_H = 22
+#: Visible length of the connector between a block and the time axis.
+CONNECTOR_LEN = 46
+#: Smallest block a message may be drawn as before it becomes a rotated label.
+MIN_BLOCK_W = 18
+LABEL_PADDING = 8
+#: Clearance from the axis for a rotated label. Below the axis it has to clear the tick numbers.
+RX_LABEL_GAP = 8
+TX_LABEL_GAP = 26
+#: Gap between the connector line and the rotated label running alongside it.
+LABEL_LINE_OFFSET = 3
+#: How far the click target extends to the left of the connector.
+HIT_LEFT_MARGIN = 5
+
+SELECTION_COLOUR = QColor(80, 160, 255)
+
+#: Repeat ticks closer together than this would be a grey smear, so they are dropped.
+MIN_REPEAT_MARK_SPACING = 14
+REPEAT_MARK_LEN = 14
+
+
+@dataclass
+class _Placement:
+    """How one timeline item will be drawn, decided before anything is painted."""
+
+    item: TimelineItem
+    x: float
+    width: float
+    text_width: float
+    narrow: bool
+    show_label: bool
+
+
+@dataclass
+class _Layout:
+    center_y: float
+    rx_y: float
+    tx_y: float
+    content_w: int
+    content_h: int
+    placements: list[_Placement]
 
 
 class ClickableTimelineRectItem(QGraphicsRectItem):
@@ -120,13 +177,13 @@ class TimelinePanel(QWidget):
         self.zoom_out_button = QPushButton("−")
         self.zoom_out_button.setFixedWidth(36)
 
-        self.zoom_reset_button = QPushButton("100%")
+        self.zoom_reset_button = QPushButton()
         self.zoom_reset_button.setFixedWidth(64)
 
         self.zoom_in_button = QPushButton("+")
         self.zoom_in_button.setFixedWidth(36)
 
-        self.zoom_hint_button = QPushButton("Ctrl+Wheel")
+        self.zoom_hint_button = QPushButton()
         self.zoom_hint_button.setEnabled(False)
 
         toolbar = QHBoxLayout()
@@ -139,9 +196,11 @@ class TimelinePanel(QWidget):
         toolbar.addStretch(1)
 
         self._row_to_rect_item: dict[int, QGraphicsRectItem] = {}
+        self._row_to_label_item: dict[int, QGraphicsSimpleTextItem] = {}
         self._selected_row: int | None = None
 
         self._document: ScenarioDocument | None = None
+        self._document_signature_cache: tuple | None = None
         self._row_statuses: dict[int, str] = {}
         self._zoom_x: float = 1.0
         self._base_px_per_ms: float = 0.25
@@ -171,8 +230,63 @@ class TimelinePanel(QWidget):
             row_statuses: dict[int, str] | None = None,
     ) -> None:
         self._document = document
-        self._row_statuses = row_statuses or {}
+        row_statuses = row_statuses or {}
+
+        # Rebuilding the whole QGraphicsScene on every refresh makes the timeline flicker while
+        # the user types. When only the status colours changed, repaint the existing items.
+        signature = self._document_signature(document)
+        if signature == self._document_signature_cache and self._row_to_rect_item:
+            self._row_statuses = row_statuses
+            self._apply_statuses_in_place()
+            return
+
+        self._document_signature_cache = signature
+        self._row_statuses = row_statuses
         self._rerender()
+
+    @staticmethod
+    def _document_signature(document: ScenarioDocument | None) -> tuple:
+        """Everything build_timeline() reads, except the statuses.
+
+        Deliberately excludes payload, title and enabled: the timeline does not render them, so a
+        change there must not cost a scene rebuild.
+        """
+        if document is None:
+            return ()
+
+        def message_key(ref) -> tuple | None:
+            return None if ref is None else (ref.category, ref.msg_id, ref.name)
+
+        return tuple(
+            (
+                step.id,
+                step.kind,
+                getattr(step, "delay_ms", None),
+                getattr(step, "timeout_ms", None),
+                message_key(getattr(step, "message", None)),
+                message_key(getattr(step, "expected", None)),
+                getattr(step, "bind_to_previous_ku", False),
+            )
+            for step in document.steps
+        )
+
+    def _apply_statuses_in_place(self) -> None:
+        for row_index, rect_item in self._row_to_rect_item.items():
+            status = self._row_statuses.get(row_index, "neutral")
+            rect_item.setData(_STATUS_ROLE, status)
+
+            if rect_item.data(_NARROW_ROLE):
+                # A rotated item has no block to fill; its colour lives in the label.
+                label = self._row_to_label_item.get(row_index)
+                if label is not None:
+                    label.setBrush(QBrush(self._label_colour_for_status(status)))
+                continue
+
+            lane = rect_item.data(_LANE_ROLE) or "tx"
+            rect_item.setBrush(self._brush_for_status(status, lane=lane))
+            rect_item.setPen(self._pen_for_status(status))
+
+        self._apply_selection_highlight()
 
     def set_selected_row(self, row_index: int | None) -> None:
         self._selected_row = row_index
@@ -203,7 +317,7 @@ class TimelinePanel(QWidget):
         old_center_ratio = (old_scroll + viewport_w / 2) / max(1.0, self.scene.sceneRect().width())
 
         self._zoom_x = value
-        self.zoom_reset_button.setText(f"{int(round(self._zoom_x * 100))}%")
+        self._update_zoom_label()
         self._rerender()
 
         new_scene_w = max(1.0, self.scene.sceneRect().width())
@@ -217,12 +331,20 @@ class TimelinePanel(QWidget):
 
     def retranslate_ui(self) -> None:
         self.zoom_hint_button.setText(tr("timeline.zoom_hint"))
+        self._update_zoom_label()
         self.gutter.update()
+
+    def _update_zoom_label(self) -> None:
+        if abs(self._zoom_x - 1.0) < 1e-9:
+            self.zoom_reset_button.setText(tr("timeline.zoom_reset"))
+        else:
+            self.zoom_reset_button.setText(f"{int(round(self._zoom_x * 100))}%")
 
     def _rerender(self) -> None:
         if self._document is None:
             self.scene.clear()
             self._row_to_rect_item.clear()
+            self._row_to_label_item.clear()
             return
 
         timeline = build_timeline(self._document, row_statuses=self._row_statuses)
@@ -234,115 +356,281 @@ class TimelinePanel(QWidget):
     def _render(self, items: list[TimelineItem], total_duration_ms: int) -> None:
         self.scene.clear()
         self._row_to_rect_item.clear()
+        self._row_to_label_item.clear()
 
-        left_margin = 20
-        right_margin = 40
-
-        center_y = 112
-        rx_y = 26
-        tx_y = 150
-        rx_label_y = 36
-        tx_label_y = 185
-
-        wait_y = center_y - 12
-        block_h = 30
         px_per_ms = self._px_per_ms()
+        layout = self._plan_layout(items, px_per_ms, total_duration_ms)
 
-        content_w = max(1200, left_margin + right_margin + int(total_duration_ms * px_per_ms) + 180)
-        content_h = 220
-        self.scene.setSceneRect(0, 0, content_w, content_h)
-
+        self.scene.setSceneRect(0, 0, layout.content_w, layout.content_h)
         self.gutter.set_geometry_params(
-            rx_label_y=rx_label_y,
-            center_y=center_y,
-            tx_label_y=tx_label_y,
-            content_h=content_h,
+            rx_label_y=layout.rx_y + BLOCK_H // 2,
+            center_y=layout.center_y,
+            tx_label_y=layout.tx_y + BLOCK_H // 2,
+            content_h=layout.content_h,
         )
 
         axis_pen = QPen(QColor(180, 180, 180))
         axis_pen.setWidth(2)
+        self.scene.addLine(
+            LEFT_MARGIN, layout.center_y, layout.content_w - RIGHT_MARGIN, layout.center_y, axis_pen
+        )
+        self.scene.addLine(
+            LEFT_MARGIN, layout.center_y - 8, LEFT_MARGIN, layout.center_y + 8,
+            QPen(QColor(170, 170, 170)),
+        )
 
-        self.scene.addLine(left_margin, center_y, content_w - right_margin, center_y, axis_pen)
-        self.scene.addLine(left_margin, center_y - 8, left_margin, center_y + 8, QPen(QColor(170, 170, 170)))
-
-        for item in items:
-            self._draw_item(
-                item=item,
-                left_margin=left_margin,
-                tx_y=tx_y,
-                rx_y=rx_y,
-                wait_y=wait_y,
-                center_y=center_y,
-                block_h=block_h,
-                px_per_ms=px_per_ms,
-            )
+        for placement in layout.placements:
+            self._draw_item(placement, layout)
 
         self._draw_time_scale(
-            left_margin=left_margin,
-            center_y=center_y,
+            left_margin=LEFT_MARGIN,
+            center_y=layout.center_y,
             total_duration_ms=total_duration_ms,
-            content_w=content_w,
-            right_margin=right_margin,
+            content_w=layout.content_w,
+            right_margin=RIGHT_MARGIN,
             px_per_ms=px_per_ms,
         )
 
         self._apply_selection_highlight()
         self.view.verticalScrollBar().setValue(0)
 
-    def _draw_item(
+    # -- layout ------------------------------------------------------------------------
+
+    def _plan_layout(
             self,
-            item: TimelineItem,
-            left_margin: int,
-            tx_y: int,
-            rx_y: int,
-            wait_y: int,
-            center_y: int,
-            block_h: int,
+            items: list[TimelineItem],
             px_per_ms: float,
-    ) -> None:
-        x = left_margin + item.start_ms * px_per_ms
+            total_duration_ms: int,
+    ) -> _Layout:
+        """Decide per item whether it gets a block or a rotated label, then size the scene.
 
-        if item.lane == "tx":
-            y = tx_y
-            w = max(18, item.duration_ms * px_per_ms)
-            h = block_h
-            rect = QRectF(x, y, w, h)
-            rect_item = ClickableTimelineRectItem(rect, item.row_index, self.row_clicked.emit)
-            rect_item.setPen(self._pen_for_status(item.status))
-            rect_item.setBrush(self._brush_for_status(item.status, lane="tx"))
-            rect_item.setToolTip(item.tooltip)
-            self.scene.addItem(rect_item)
-            self._row_to_rect_item[item.row_index] = rect_item
-            self._maybe_add_text(rect, item.title, y_offset=7)
-            self._draw_arrow_to_axis(x + w / 2, y, center_y, upward=True)
-            return
+        Rotated labels extend away from the axis, so how much vertical room each lane needs is
+        only known once every label has been measured.
+        """
+        metrics = QFontMetrics(self._label_font())
+        placements: list[_Placement] = []
 
-        if item.lane == "rx":
-            y = rx_y
-            w = max(18, item.duration_ms * px_per_ms)
-            h = block_h
-            rect = QRectF(x, y, w, h)
-            rect_item = ClickableTimelineRectItem(rect, item.row_index, self.row_clicked.emit)
-            rect_item.setPen(self._pen_for_status(item.status))
-            rect_item.setBrush(self._brush_for_status(item.status, lane="rx"))
-            rect_item.setToolTip(item.tooltip)
-            self.scene.addItem(rect_item)
-            self._row_to_rect_item[item.row_index] = rect_item
-            self._maybe_add_text(rect, item.title, y_offset=7)
-            self._draw_arrow_to_axis(x + w / 2, y + h, center_y, upward=False)
-            return
+        for item in items:
+            x = LEFT_MARGIN + item.start_ms * px_per_ms
+            width = max(MIN_BLOCK_W, item.duration_ms * px_per_ms)
+            text_w = metrics.horizontalAdvance(item.title)
+            narrow = item.lane != "wait" and width < text_w + 2 * LABEL_PADDING
+
+            placements.append(
+                _Placement(
+                    item=item,
+                    x=x,
+                    width=width,
+                    text_width=text_w,
+                    narrow=narrow,
+                    show_label=True,
+                )
+            )
+
+        self._resolve_label_collisions(placements, metrics.height())
+
+        rotated = {"rx": 0.0, "tx": 0.0}
+        for placement in placements:
+            if placement.narrow and placement.show_label:
+                rotated[placement.item.lane] = max(
+                    rotated[placement.item.lane], placement.text_width
+                )
+
+        above = max(BLOCK_H + CONNECTOR_LEN, rotated["rx"] + RX_LABEL_GAP)
+        below = max(BLOCK_H + CONNECTOR_LEN, rotated["tx"] + TX_LABEL_GAP)
+
+        center_y = TOP_MARGIN + above
+        content_h = int(center_y + below + BOTTOM_MARGIN)
+        content_w = max(
+            1200,
+            int(LEFT_MARGIN + RIGHT_MARGIN + total_duration_ms * px_per_ms + 180),
+        )
+
+        return _Layout(
+            center_y=center_y,
+            rx_y=center_y - CONNECTOR_LEN - BLOCK_H,
+            tx_y=center_y + CONNECTOR_LEN,
+            content_w=content_w,
+            content_h=content_h,
+            placements=placements,
+        )
+
+    @staticmethod
+    def _resolve_label_collisions(placements: list[_Placement], text_height: int) -> None:
+        """Rotated labels are vertical strips; two at the same x would overprint.
+
+        Overlapping ones lose their text but keep their connector and click target, and the
+        tooltip still names them — zooming in separates them.
+        """
+        thickness = text_height + 2
+        last_x: dict[str, float] = {}
+
+        for placement in placements:
+            if not placement.narrow:
+                continue
+            lane = placement.item.lane
+            centre = placement.x + placement.width / 2
+            previous = last_x.get(lane)
+            if previous is not None and abs(centre - previous) < thickness:
+                placement.show_label = False
+                continue
+            last_x[lane] = centre
+
+    def _label_font(self):
+        font = self.view.font()
+        font.setPointSize(max(9, font.pointSize()))
+        return font
+
+    # -- drawing -----------------------------------------------------------------------
+
+    def _draw_item(self, placement: _Placement, layout: _Layout) -> None:
+        item = placement.item
 
         if item.lane == "wait":
-            w = max(20, item.duration_ms * px_per_ms)
-            rect = QRectF(x, wait_y, w, 22)
-            rect_item = ClickableTimelineRectItem(rect, item.row_index, self.row_clicked.emit)
-            rect_item.setPen(self._pen_for_status(item.status))
-            rect_item.setBrush(self._brush_for_status(item.status, lane="wait"))
-            rect_item.setToolTip(item.tooltip)
-            self.scene.addItem(rect_item)
-            self._row_to_rect_item[item.row_index] = rect_item
-            self._maybe_add_small_text(rect.x() + 4, rect.y() - 16, item.subtitle)
+            self._draw_wait(placement, layout)
             return
+
+        upward = item.lane == "tx"
+        if placement.narrow:
+            self._draw_narrow(placement, layout, upward=upward)
+        else:
+            self._draw_block(placement, layout, upward=upward)
+
+    def _draw_block(self, placement: _Placement, layout: _Layout, upward: bool) -> None:
+        item = placement.item
+        y = layout.tx_y if upward else layout.rx_y
+        rect = QRectF(placement.x, y, placement.width, BLOCK_H)
+
+        rect_item = self._add_hit_rect(rect, item)
+        rect_item.setPen(self._pen_for_status(item.status))
+        rect_item.setBrush(self._brush_for_status(item.status, lane=item.lane))
+
+        self._add_centred_text(rect, item.title)
+        arrow_from = y if upward else y + BLOCK_H
+        self._draw_arrow_to_axis(
+            placement.x + placement.width / 2, arrow_from, layout.center_y, upward=upward
+        )
+        self._draw_repeat_marks(placement, layout, upward=upward)
+
+    def _draw_narrow(self, placement: _Placement, layout: _Layout, upward: bool) -> None:
+        """No block: the connector becomes the mark and the title runs along it, rotated 90°."""
+        item = placement.item
+        centre_x = placement.x + placement.width / 2
+
+        gap = TX_LABEL_GAP if upward else RX_LABEL_GAP
+        if upward:
+            label_near = layout.center_y + gap
+            label_far = label_near + placement.text_width
+        else:
+            label_near = layout.center_y - gap
+            label_far = label_near - placement.text_width
+
+        # The connector runs the whole length of the label, so the label reads as a caption on
+        # the arrow rather than as a detached word.
+        self._draw_arrow_to_axis(centre_x, label_far, layout.center_y, upward=upward)
+
+        label_width = 0.0
+        if placement.show_label:
+            label_item = QGraphicsSimpleTextItem(item.title)
+            label_item.setFont(self._label_font())
+            label_item.setBrush(QBrush(self._label_colour_for_status(item.status)))
+            label_item.setRotation(-90)
+            # Rotating -90° about the top-left corner makes the item grow upward from its
+            # position, so anchor at the far end when the label runs downward. Offsetting it
+            # sideways keeps the connector line from striking through the glyphs.
+            label_width = label_item.boundingRect().height()
+            anchor_y = label_far if upward else label_near
+            label_item.setPos(centre_x + LABEL_LINE_OFFSET, anchor_y)
+            label_item.setToolTip(item.tooltip)
+            self.scene.addItem(label_item)
+            self._row_to_label_item[item.row_index] = label_item
+
+        self._draw_repeat_marks(placement, layout, upward=upward)
+
+        top = min(label_near, label_far)
+        bottom = max(label_near, label_far)
+        hit = QRectF(
+            centre_x - HIT_LEFT_MARGIN,
+            top,
+            HIT_LEFT_MARGIN + LABEL_LINE_OFFSET + max(label_width, BLOCK_H / 3),
+            max(bottom - top, BLOCK_H),
+        )
+        rect_item = self._add_hit_rect(hit, item, invisible=True)
+        rect_item.setData(_NARROW_ROLE, True)
+
+    def _draw_repeat_marks(self, placement: _Placement, layout: _Layout, upward: bool) -> None:
+        """Ghost ticks at each repeat, so a cyclic send reads as a cadence rather than one event.
+
+        The timeline models the scenario's own duration, which a repeat outrun by definition, so
+        the marks simply continue to the end of the scene.
+        """
+        period_ms = placement.item.repeat_period_ms
+        if not period_ms:
+            return
+
+        px_per_ms = self._px_per_ms()
+        step_px = period_ms * px_per_ms
+        if step_px < MIN_REPEAT_MARK_SPACING:
+            return
+
+        pen = QPen(QColor(120, 120, 120))
+        pen.setStyle(Qt.PenStyle.DotLine)
+
+        y_from = layout.center_y
+        y_to = (layout.center_y + REPEAT_MARK_LEN) if upward else (layout.center_y - REPEAT_MARK_LEN)
+
+        x = placement.x + placement.width / 2 + step_px
+        limit = self.scene.sceneRect().width() - RIGHT_MARGIN
+        while x < limit:
+            self.scene.addLine(x, y_from, x, y_to, pen)
+            x += step_px
+
+    def _draw_wait(self, placement: _Placement, layout: _Layout) -> None:
+        item = placement.item
+        rect = QRectF(placement.x, layout.center_y - WAIT_H / 2, placement.width, WAIT_H)
+
+        rect_item = self._add_hit_rect(rect, item)
+        rect_item.setPen(self._pen_for_status(item.status))
+        rect_item.setBrush(self._brush_for_status(item.status, lane="wait"))
+
+        if placement.width >= placement.text_width + 2 * LABEL_PADDING:
+            self._add_centred_text(rect, item.subtitle or item.title)
+
+    def _add_hit_rect(
+            self,
+            rect: QRectF,
+            item: TimelineItem,
+            invisible: bool = False,
+    ) -> ClickableTimelineRectItem:
+        rect_item = ClickableTimelineRectItem(rect, item.row_index, self.row_clicked.emit)
+        rect_item.setToolTip(item.tooltip)
+        rect_item.setData(_STATUS_ROLE, item.status)
+        rect_item.setData(_LANE_ROLE, item.lane)
+        rect_item.setData(_NARROW_ROLE, invisible)
+        if invisible:
+            rect_item.setPen(QPen(Qt.PenStyle.NoPen))
+            rect_item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        self.scene.addItem(rect_item)
+        self._row_to_rect_item[item.row_index] = rect_item
+        return rect_item
+
+    def _add_centred_text(self, rect: QRectF, text: str) -> None:
+        if not text:
+            return
+        font = self._label_font()
+        metrics = QFontMetrics(font)
+        text_w = metrics.horizontalAdvance(text)
+        if text_w + 2 * LABEL_PADDING > rect.width():
+            return
+
+        label = QGraphicsSimpleTextItem(text)
+        label.setFont(font)
+        label.setBrush(QBrush(QColor(245, 245, 245)))
+        label.setPos(
+            rect.x() + (rect.width() - text_w) / 2,
+            rect.y() + (rect.height() - metrics.height()) / 2,
+        )
+        self.scene.addItem(label)
 
     def _draw_arrow_to_axis(self, x: float, y_from: float, center_y: int, upward: bool) -> None:
         pen = QPen(QColor(120, 120, 120))
@@ -473,20 +761,49 @@ class TimelinePanel(QWidget):
 
     def _apply_selection_highlight(self) -> None:
         for row_index, rect_item in self._row_to_rect_item.items():
-            pen = rect_item.pen()
-            if row_index == self._selected_row:
-                pen.setWidth(3)
-                pen.setColor(QColor(80, 160, 255))
-            else:
-                if pen.color() in (
-                        QColor(120, 220, 120),
-                        QColor(240, 120, 120),
-                        QColor(240, 210, 100),
-                        QColor(120, 180, 255),
-                        QColor(160, 160, 160),
-                ):
+            selected = row_index == self._selected_row
+            narrow = bool(rect_item.data(_NARROW_ROLE))
+            status = rect_item.data(_STATUS_ROLE) or "neutral"
+
+            if narrow:
+                # Nothing is painted for a rotated item, so selection shows the hit area as an
+                # outline and bolds the label.
+                if selected:
+                    pen = QPen(SELECTION_COLOUR)
                     pen.setWidth(2)
                 else:
-                    pen.setWidth(1)
-                    pen.setColor(QColor(180, 180, 180))
+                    pen = QPen(Qt.PenStyle.NoPen)
+                rect_item.setPen(pen)
+
+                label = self._row_to_label_item.get(row_index)
+                if label is not None:
+                    font = label.font()
+                    font.setBold(selected)
+                    label.setFont(font)
+                    label.setBrush(
+                        QBrush(SELECTION_COLOUR if selected else self._label_colour_for_status(status))
+                    )
+                continue
+
+            if selected:
+                pen = QPen(SELECTION_COLOUR)
+                pen.setWidth(3)
+            else:
+                # Re-derive from the recorded status instead of guessing it back out of the
+                # current pen colour, which broke as soon as an item was repainted.
+                pen = self._pen_for_status(status)
             rect_item.setPen(pen)
+
+    def _label_colour_for_status(self, status: str) -> QColor:
+        """Rotated labels carry the status themselves, since they have no fill to colour."""
+        if status == "ok":
+            return QColor(140, 225, 140)
+        if status == "error":
+            return QColor(245, 140, 140)
+        if status == "warning":
+            return QColor(240, 215, 120)
+        if status == "current":
+            return QColor(140, 195, 255)
+        if status == "pending":
+            return QColor(165, 165, 165)
+        return QColor(230, 230, 230)

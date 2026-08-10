@@ -12,6 +12,8 @@ from detector_scenario_tool.domain.scenario import (
 )
 from detector_scenario_tool.protocol.message_lengths import get_expected_message_length
 from detector_scenario_tool.protocol.packers import pack_send_message_step, payload_to_hex
+from detector_scenario_tool.storage.migration import CURRENT_SCHEMA_VERSION
+from detector_scenario_tool.storage.scenario_io import PROTOCOL_VERSION
 
 
 def build_packed_scenario_export(document: ScenarioDocument) -> dict:
@@ -62,6 +64,11 @@ def build_packed_scenario_export(document: ScenarioDocument) -> dict:
                     "payload": dict(step.payload),
                     "ack_policy": step.ack_policy.value,
                     "ack_timeout_ms": step.ack_timeout_ms,
+                    "cyclic": None if step.cyclic is None else {
+                        "enabled": step.cyclic.enabled,
+                        "period_ms": step.cyclic.period_ms,
+                        "max_repeats": step.cyclic.max_repeats,
+                    },
                     "retry": {
                         "attempts": step.retry.attempts,
                         "retry_delay_ms": step.retry.retry_delay_ms,
@@ -126,7 +133,9 @@ def build_packed_scenario_export(document: ScenarioDocument) -> dict:
             )
 
     return {
-        "schema_version": document.schema_version,
+        "schema_version": CURRENT_SCHEMA_VERSION,
+        # Board tooling consuming this needs to know which protocol revision produced the bytes.
+        "protocol_version": PROTOCOL_VERSION,
         "metadata": {
             "name": document.metadata.name,
             "author": document.metadata.author,
@@ -139,6 +148,43 @@ def build_packed_scenario_export(document: ScenarioDocument) -> dict:
             "strict_timeout_checks": document.validation.strict_timeout_checks,
         },
         "steps": steps,
+        # Messages the scenario defines itself; a consumer cannot look these up anywhere else.
+        "custom_messages": [
+            {
+                "id": spec.id,
+                "name": spec.name,
+                "category": spec.category,
+                "msg_id": spec.msg_id,
+                "msg_id_hex": f"0x{spec.msg_id:04X}",
+                "length": spec.length,
+                "is_long": spec.is_long,
+                "content_hex": payload_to_hex(spec.content_bytes()),
+                "destination_id": spec.destination_id,
+                "source_id": spec.source_id,
+            }
+            for spec in getattr(document, "custom_messages", [])
+        ],
+        # Everything a schema upgrade could not carry over, so the loss is visible in the export
+        # rather than only in the UI that produced it.
+        "migration_notes": [
+            {"code": note.code, "step_index": note.step_index, "params": dict(note.params)}
+            for note in getattr(document, "migration_notes", [])
+        ],
+        "cyclic": [
+            {
+                "step_index": index,
+                "category": step.message.category,
+                "msg_id": step.message.msg_id,
+                "msg_id_hex": f"0x{step.message.msg_id:04X}",
+                "period_ms": step.cyclic.period_ms,
+                "max_repeats": step.cyclic.max_repeats,
+            }
+            for index, step in enumerate(document.steps)
+            if isinstance(step, SendMessageStep)
+            and step.repeats
+            and step.message is not None
+            and step.message.msg_id is not None
+        ],
     }
 
 

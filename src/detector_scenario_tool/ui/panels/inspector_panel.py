@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from detector_scenario_tool.domain.scenario import (
     AckPolicy,
+    CyclicPolicy,
     MessageRef,
     RetryPolicy,
     SendMessageStep,
@@ -26,11 +27,17 @@ from detector_scenario_tool.domain.scenario import (
     WaitTimeStep,
 )
 from detector_scenario_tool.i18n import tr
+from detector_scenario_tool.utils.labels import category_short, message_label
+from detector_scenario_tool.protocol import registry
 from detector_scenario_tool.protocol.catalog import ProtocolCatalog
 from detector_scenario_tool.protocol.expected_responses import get_send_defaults
 from detector_scenario_tool.protocol.message_lengths import get_expected_message_length
 from detector_scenario_tool.protocol.packers import pack_send_message_step, payload_to_hex
 from detector_scenario_tool.ui.editors.payload_editor_registry import build_payload_editor_registry
+from detector_scenario_tool.ui.widgets.input_behaviour import (
+    apply_deferred_commit,
+    commit_pending_edits,
+)
 
 
 class InspectorPanel(QWidget):
@@ -67,8 +74,37 @@ class InspectorPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.stack)
 
+        apply_deferred_commit(self)
+
         self.retranslate_ui()
         self._set_empty()
+
+    def reload_message_catalog(self) -> None:
+        """Rebuild the payload editors and selectors after the message registry changed.
+
+        User-defined messages are registered at runtime, so the editor for one only exists once
+        its definition does.
+        """
+        self.payload_editors = build_payload_editor_registry()
+        for editor in self.payload_editors.values():
+            editor.changed.connect(self._apply_message_page)
+
+        self.current_payload_editor = None
+        while self.payload_editor_host_layout.count():
+            item = self.payload_editor_host_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+
+        step = self.current_step
+        self.current_step = None
+        self.set_step(step)
+
+    def commit_pending_edits(self) -> None:
+        """Flush a value that has been typed but not yet confirmed by Enter or focus loss."""
+        commit_pending_edits(self)
+        if self.current_payload_editor is not None:
+            commit_pending_edits(self.current_payload_editor)
 
     def retranslate_ui(self) -> None:
         self.empty_label.setText(tr("inspector.empty"))
@@ -76,10 +112,11 @@ class InspectorPanel(QWidget):
         self.common_group.setTitle(tr("inspector.group.common"))
         self.message_group.setTitle(tr("inspector.group.message"))
         self.retry_group.setTitle(tr("inspector.group.retry"))
+        self.cyclic_group.setTitle(tr("inspector.group.cyclic"))
         self.payload_group.setTitle(tr("inspector.group.payload"))
         self.pack_group.setTitle(tr("inspector.group.packed_preview"))
         self.wait_time_group.setTitle(tr("inspector.group.wait_time"))
-        self.wait_ts_group.setTitle(tr("inspector.group.wait_for_ts"))
+        self.wait_ts_group.setTitle(tr("inspector.group.wait_for_ts", category=category_short("TS")))
 
         self.payload_info_label.setText(tr("inspector.payload.no_specialized_editor"))
 
@@ -93,8 +130,16 @@ class InspectorPanel(QWidget):
         self.msg_ack_policy.setCurrentIndex(idx if idx >= 0 else 0)
         self.msg_ack_policy.blockSignals(False)
 
-        self._retranslate_message_selector()
-        self._retranslate_wait_ts_selector()
+        # Pass the current step: retranslating with None empties the selector, and since
+        # set_step() short-circuits on the same step object nothing would refill it.
+        current_send_step = (
+            self.current_step if isinstance(self.current_step, SendMessageStep) else None
+        )
+        current_wait_step = (
+            self.current_step if isinstance(self.current_step, WaitForTsStep) else None
+        )
+        self._retranslate_message_selector(current_send_step)
+        self._retranslate_wait_ts_selector(current_wait_step)
 
         self._retranslate_form(self.common_form, [
             tr("inspector.field.title"),
@@ -112,6 +157,11 @@ class InspectorPanel(QWidget):
             tr("inspector.field.retry_on_timeout"),
             tr("inspector.field.retry_on_reject"),
         ])
+        self._retranslate_form(self.cyclic_form, [
+            tr("inspector.field.cyclic_enabled"),
+            tr("inspector.field.cyclic_period"),
+        ])
+        self.cyclic_enabled_checkbox.setText(tr("inspector.cyclic.hint"))
         self._retranslate_form(self.pack_form, [
             tr("inspector.field.pack_status"),
             tr("inspector.field.expected_length"),
@@ -127,9 +177,9 @@ class InspectorPanel(QWidget):
         self._retranslate_form(self.wait_ts_form, [
             tr("inspector.field.title"),
             tr("inspector.field.enabled"),
-            tr("inspector.field.expected_ts"),
+            tr("inspector.field.expected_ts", category=category_short("TS")),
             tr("inspector.field.timeout_ms"),
-            tr("inspector.field.bind_to_previous_ku"),
+            tr("inspector.field.bind_to_previous_ku", category=category_short("KU")),
             tr("inspector.field.ack_for_msg_id"),
             tr("inspector.field.require_ack_accepted"),
             tr("inspector.field.comment"),
@@ -198,6 +248,18 @@ class InspectorPanel(QWidget):
         self.retry_form.addRow(QLabel(), self.msg_retry_on_timeout)
         self.retry_form.addRow(QLabel(), self.msg_retry_on_reject)
 
+        # Repeating is only offered for messages the protocol repeats — telemetry commands.
+        self.cyclic_group = QGroupBox()
+        self.cyclic_form = QFormLayout(self.cyclic_group)
+
+        self.cyclic_enabled_checkbox = QCheckBox()
+        self.cyclic_period_spin = QSpinBox()
+        self.cyclic_period_spin.setRange(1, 3600)
+        self.cyclic_period_spin.setSuffix(" s")
+
+        self.cyclic_form.addRow(QLabel(), self.cyclic_enabled_checkbox)
+        self.cyclic_form.addRow(QLabel(), self.cyclic_period_spin)
+
         self.payload_group = QGroupBox()
         payload_layout = QVBoxLayout(self.payload_group)
 
@@ -227,11 +289,12 @@ class InspectorPanel(QWidget):
         layout.addWidget(self.common_group)
         layout.addWidget(self.message_group)
         layout.addWidget(self.retry_group)
+        layout.addWidget(self.cyclic_group)
         layout.addWidget(self.payload_group)
         layout.addWidget(self.pack_group)
         layout.addStretch(1)
 
-        self.msg_title_edit.textChanged.connect(self._apply_message_page)
+        self.msg_title_edit.textEdited.connect(self._apply_message_page)
         self.msg_comment_edit.textChanged.connect(self._apply_message_page)
         self.msg_enabled_checkbox.stateChanged.connect(self._apply_message_page)
         self.msg_selector.currentIndexChanged.connect(self._apply_message_page)
@@ -242,6 +305,9 @@ class InspectorPanel(QWidget):
         self.msg_retry_delay_ms.valueChanged.connect(self._apply_message_page)
         self.msg_retry_on_timeout.stateChanged.connect(self._apply_message_page)
         self.msg_retry_on_reject.stateChanged.connect(self._apply_message_page)
+
+        self.cyclic_enabled_checkbox.stateChanged.connect(self._apply_message_page)
+        self.cyclic_period_spin.valueChanged.connect(self._apply_message_page)
 
         return page
 
@@ -268,7 +334,7 @@ class InspectorPanel(QWidget):
         layout.addWidget(self.wait_time_group)
         layout.addStretch(1)
 
-        self.wait_title_edit.textChanged.connect(self._apply_wait_time_page)
+        self.wait_title_edit.textEdited.connect(self._apply_wait_time_page)
         self.wait_comment_edit.textChanged.connect(self._apply_wait_time_page)
         self.wait_enabled_checkbox.stateChanged.connect(self._apply_wait_time_page)
         self.wait_delay_spin.valueChanged.connect(self._apply_wait_time_page)
@@ -309,7 +375,7 @@ class InspectorPanel(QWidget):
         layout.addWidget(self.wait_ts_group)
         layout.addStretch(1)
 
-        self.wait_ts_title_edit.textChanged.connect(self._apply_wait_ts_page)
+        self.wait_ts_title_edit.textEdited.connect(self._apply_wait_ts_page)
         self.wait_ts_comment_edit.textChanged.connect(self._apply_wait_ts_page)
         self.wait_ts_enabled_checkbox.stateChanged.connect(self._apply_wait_ts_page)
         self.wait_ts_selector.currentIndexChanged.connect(self._apply_wait_ts_page)
@@ -321,6 +387,12 @@ class InspectorPanel(QWidget):
         return page
 
     def set_step(self, step) -> None:
+        if step is not None and step is self.current_step:
+            # Same step object: the caller is reacting to our own edit. Re-populating the input
+            # widgets here would overwrite the field the user is typing in.
+            self.refresh_derived_views()
+            return
+
         self.current_step = step
         self._building = True
 
@@ -346,6 +418,11 @@ class InspectorPanel(QWidget):
     def _set_empty(self) -> None:
         self.stack.setCurrentWidget(self.empty_page)
 
+    def refresh_derived_views(self) -> None:
+        """Update read-only widgets without touching anything the user can type into."""
+        if isinstance(self.current_step, SendMessageStep):
+            self._update_pack_preview(self.current_step)
+
     def _populate_message_page(self, step: SendMessageStep) -> None:
         self.msg_title_edit.setText(step.title)
         self.msg_comment_edit.setPlainText(step.comment)
@@ -365,8 +442,41 @@ class InspectorPanel(QWidget):
         self.msg_retry_on_reject.setChecked(step.retry.retry_on_reject)
 
         self._update_retry_controls_enabled_state(step.ack_policy)
-        self._swap_payload_editor(step)
+        self._populate_cyclic_controls(step)
+        # Populating a different step: the editor must be re-seeded even if it is the same widget.
+        self._swap_payload_editor(step, force=True)
         self._update_pack_preview(step)
+
+    def _populate_cyclic_controls(self, step: SendMessageStep) -> None:
+        supported = self._supports_cyclic(step)
+        self.cyclic_group.setVisible(supported)
+        if not supported:
+            return
+
+        policy = step.cyclic
+        self.cyclic_enabled_checkbox.setChecked(bool(policy and policy.enabled))
+        self.cyclic_period_spin.setValue(
+            int((policy.period_ms if policy else 20_000) / 1000) or 1
+        )
+        self.cyclic_period_spin.setEnabled(self.cyclic_enabled_checkbox.isChecked())
+
+    @staticmethod
+    def _supports_cyclic(step: SendMessageStep) -> bool:
+        if step.message is None or step.message.msg_id is None:
+            return False
+        spec = registry.find(step.message.category, step.message.msg_id)
+        return spec is not None and spec.cyclic_default is not None
+
+    def _apply_cyclic_to_step(self, step: SendMessageStep) -> None:
+        if not self._supports_cyclic(step):
+            step.cyclic = None
+            return
+
+        step.cyclic = CyclicPolicy(
+            enabled=self.cyclic_enabled_checkbox.isChecked(),
+            period_ms=self.cyclic_period_spin.value() * 1000,
+        )
+        self.cyclic_period_spin.setEnabled(step.cyclic.enabled)
 
     def _update_retry_controls_enabled_state(self, ack_policy: AckPolicy) -> None:
         enable_retry = ack_policy != AckPolicy.NONE
@@ -406,7 +516,20 @@ class InspectorPanel(QWidget):
             self.msg_selector.setCurrentIndex(selected_index)
         self.msg_selector.blockSignals(False)
 
-    def _swap_payload_editor(self, step: SendMessageStep) -> None:
+    def _swap_payload_editor(self, step: SendMessageStep, force: bool = False) -> None:
+        """Put the editor for `step`'s message into the host.
+
+        Reparenting a widget destroys its focus, and `set_payload` overwrites whatever the user is
+        typing, so this must only run when the editor actually has to change. `force` is for the
+        case where the editor instance stays the same but now belongs to a different step.
+        """
+        editor = None
+        if step.message is not None and step.message.msg_id is not None:
+            editor = self.payload_editors.get((step.message.category, step.message.msg_id))
+
+        if not force and editor is not None and editor is self.current_payload_editor:
+            return
+
         while self.payload_editor_host_layout.count():
             item = self.payload_editor_host_layout.takeAt(0)
             widget = item.widget()
@@ -414,13 +537,6 @@ class InspectorPanel(QWidget):
                 widget.setParent(None)
 
         self.current_payload_editor = None
-
-        if step.message is None or step.message.msg_id is None:
-            self.payload_info_label.setVisible(True)
-            return
-
-        key = (step.message.category, step.message.msg_id)
-        editor = self.payload_editors.get(key)
 
         if editor is None:
             self.payload_info_label.setVisible(True)
@@ -596,8 +712,18 @@ class InspectorPanel(QWidget):
 
         self._update_retry_controls_enabled_state(self.current_step.ack_policy)
 
+        if selected_changed:
+            # Only a different message needs a different editor. Swapping on every keystroke was
+            # what kicked the user out of the field being edited.
+            self._swap_payload_editor(self.current_step, force=True)
+            self._seed_cyclic_default(self.current_step)
+            self._populate_cyclic_controls(self.current_step)
+
+        self._apply_cyclic_to_step(self.current_step)
+
+        # Rewrites the payload from the editor now on screen, so keys belonging to a
+        # previously selected message do not linger in the step.
         self._apply_payload_to_step(self.current_step)
-        self._swap_payload_editor(self.current_step)
         self._update_pack_preview(self.current_step)
 
         self.changed.emit()
@@ -617,6 +743,21 @@ class InspectorPanel(QWidget):
 
         height = visible_blocks * line_spacing + doc_margin * 2 + 10
         edit.setFixedHeight(height)
+
+    @staticmethod
+    def _seed_cyclic_default(step: SendMessageStep) -> None:
+        """A newly chosen message brings the protocol's own repeat policy with it."""
+        if step.message is None or step.message.msg_id is None:
+            step.cyclic = None
+            return
+
+        spec = registry.find(step.message.category, step.message.msg_id)
+        default = spec.cyclic_default if spec is not None else None
+        step.cyclic = (
+            None
+            if default is None
+            else CyclicPolicy(enabled=default.enabled, period_ms=default.period_ms)
+        )
 
     def _apply_payload_to_step(self, step: SendMessageStep) -> None:
         if self.current_payload_editor is None:

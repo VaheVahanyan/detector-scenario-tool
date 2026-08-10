@@ -6,6 +6,11 @@ from pathlib import Path
 from detector_scenario_tool.domain.logs import LogRecord
 
 
+#: Written by this version; older files are still accepted.
+LOG_VERSION = "2"
+SUPPORTED_LOG_VERSIONS = ("1", "2")
+
+
 class LogLoadError(ValueError):
     pass
 
@@ -56,7 +61,7 @@ def parse_log_line(raw_line: str, line_no: int = 1) -> LogRecord | None:
         fields[key.strip()] = value.strip()
 
     version = fields.get("v")
-    if version != "1":
+    if version not in SUPPORTED_LOG_VERSIONS:
         raise LogLoadError(f"Line {line_no}: unsupported log version '{version}'.")
 
     source = fields.get("src", "")
@@ -83,6 +88,11 @@ def parse_log_line(raw_line: str, line_no: int = 1) -> LogRecord | None:
     category = _category_from_msg_id(msg_id, line_no)
     payload = _parse_compact_hex(data_text, line_no)
 
+    # v=2 adds the wire detail. A v=1 line simply has none of it, and the defaults are right.
+    can_id = _parse_optional_hex(fields.get("can"), line_no)
+    frame_count = _parse_optional_int(fields.get("frames"), line_no) or 1
+    valid = fields.get("valid", "1") not in ("0", "false", "no")
+
     return LogRecord(
         timestamp_ms=timestamp_ms,
         direction=direction,
@@ -91,6 +101,9 @@ def parse_log_line(raw_line: str, line_no: int = 1) -> LogRecord | None:
         payload=payload,
         source=source,
         note="",
+        can_id=can_id,
+        frame_count=frame_count,
+        valid=valid,
     )
 
 
@@ -217,7 +230,38 @@ def _parse_compact_hex(value: str, line_no: int) -> bytes:
 
 
 def format_log_record_line(record: LogRecord) -> str:
-    return (
-        f"DSTLOG|v=1|src={record.source}|ts={record.timestamp_ms}|"
+    """Write the current format.
+
+    v=2 adds `can`, `frames` and `valid`. The extra fields are appended, and the reader treats
+    unknown ones as absent, so a v=2 line stays readable by anything that parsed v=1 loosely and
+    a v=1 file still loads here.
+    """
+    line = (
+        f"DSTLOG|v={LOG_VERSION}|src={record.source}|ts={record.timestamp_ms}|"
         f"dir={record.direction}|id={record.msg_id:04X}|data={record.payload.hex().upper()}"
     )
+    if record.can_id is not None:
+        line += f"|can={record.can_id:03X}"
+    if record.frame_count != 1:
+        line += f"|frames={record.frame_count}"
+    if not record.valid:
+        line += "|valid=0"
+    return line
+
+
+def _parse_optional_hex(value: str | None, line_no: int) -> int | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value, 16)
+    except ValueError as exc:
+        raise LogLoadError(f"Line {line_no}: invalid hex can value.") from exc
+
+
+def _parse_optional_int(value: str | None, line_no: int) -> int | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise LogLoadError(f"Line {line_no}: invalid frames value.") from exc

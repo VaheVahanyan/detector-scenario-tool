@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, QEvent
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QHeaderView,
     QHBoxLayout,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from detector_scenario_tool.app import settings as app_settings
 from detector_scenario_tool.codegen import save_generated_scenario_files
 from detector_scenario_tool.domain.log_roles import normalize_log_source
 from detector_scenario_tool.domain.logs import LogRecord
@@ -37,26 +39,71 @@ from detector_scenario_tool.domain.scenario import (
     WaitTimeStep,
 )
 from detector_scenario_tool.i18n import get_language, set_language, tr
+from detector_scenario_tool.utils.labels import category_short, message_label_from_ref
+from detector_scenario_tool.protocol import registry
 from detector_scenario_tool.protocol.catalog import ProtocolCatalog
+from detector_scenario_tool.protocol.fields import unpack_message
 from detector_scenario_tool.protocol.expected_responses import get_expected_responses
 from detector_scenario_tool.services.serial_log_controller import SerialLogController
 from detector_scenario_tool.storage.log_io import load_log_records, format_log_record_line
 from detector_scenario_tool.storage.packed_export import save_packed_scenario_export
+from detector_scenario_tool.storage.migration import CURRENT_SCHEMA_VERSION
 from detector_scenario_tool.storage.scenario_io import load_scenario, save_scenario
 from detector_scenario_tool.ui.delegates.wrap_text_delegate import WrapTextDelegate
 from detector_scenario_tool.ui.models.scenario_table_model import ScenarioTableModel
 from detector_scenario_tool.ui.models.warnings_table_model import WarningsTableModel
 from detector_scenario_tool.ui.panels.inspector_panel import InspectorPanel
+from detector_scenario_tool.services.custom_message_sync import CustomMessageSync
+from detector_scenario_tool.services.run_controller import RunController
+from detector_scenario_tool.services.scenario_runner import RunState
+from detector_scenario_tool.transport.backend import ConnectionSettings
 from detector_scenario_tool.ui.panels.log_panel import LogPanel
+from detector_scenario_tool.ui.panels.packets_panel import PacketsPanel
+from detector_scenario_tool.ui.dialogs.message_catalog_dialog import MessageCatalogDialog
+from detector_scenario_tool.ui.panels.run_panel import RunPanel
 from detector_scenario_tool.ui.panels.timeline_panel import TimelinePanel
 from detector_scenario_tool.validation.analyzer import analyze_scenario
+from detector_scenario_tool.validation.diagnostics import Diagnostic, Severity
+
+
+class _Note:
+    """Same shape as a storage migration note, so the warnings panel renders it unchanged."""
+
+    def __init__(self, code: str, step_index: int | None, params: dict) -> None:
+        self.code = code
+        self.step_index = step_index
+        self.params = params
+
+
+def _scenario_file_filter() -> str:
+    return f'{tr("filter.scenario_files")};;{tr("filter.all_files")}'
+
+
+def _log_file_filter() -> str:
+    return f'{tr("filter.log_files")};;{tr("filter.all_files")}'
+
+
+def _migration_diagnostics(document) -> list[Diagnostic]:
+    """Surface schema-migration notes in the warnings panel.
+
+    A quarantined step is easy to miss otherwise: it looks like an ordinary disabled comment.
+    """
+    return [
+        Diagnostic(
+            severity=Severity.WARNING if note.step_index is not None else Severity.INFO,
+            step_index=note.step_index if note.step_index is not None else -1,
+            code=note.code,
+            params=dict(note.params),
+        )
+        for note in getattr(document, "migration_notes", [])
+    ]
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Detector Scenario Tool")
         self.resize(1500, 920)
+        self._document_modified = False
 
         self.catalog = ProtocolCatalog()
         self.current_path: Path | None = None
@@ -70,12 +117,15 @@ class MainWindow(QMainWindow):
 
         self._serial_controllers: list[SerialLogController] = []
         self._live_refresh_pending = False
+        self._step_refresh_pending = False
+        self._live_run_confirmed = False
+        self._run_statuses: dict[int, str] = {}
         self._live_session_save_enabled = False
         self._live_session_save_path = ""
         self._live_session_file = None
 
         self.document = ScenarioDocument(
-            schema_version=1,
+            schema_version=CURRENT_SCHEMA_VERSION,
             metadata=ScenarioMetadata(name="Untitled scenario"),
             validation=ValidationProfile(),
             steps=[],
@@ -101,10 +151,10 @@ class MainWindow(QMainWindow):
         """)
         self.table_view.viewport().installEventFilter(self)
 
-        self.add_ku_button = QPushButton(tr("button.add_ku"))
-        self.add_kt_button = QPushButton(tr("button.add_kt"))
+        self.add_ku_button = QPushButton(tr("button.add_ku", category=category_short("KU")))
+        self.add_kt_button = QPushButton(tr("button.add_kt", category=category_short("KT")))
         self.add_wait_button = QPushButton(tr("button.add_wait"))
-        self.add_wait_ts_button = QPushButton(tr("button.add_wait_ts"))
+        self.add_wait_ts_button = QPushButton(tr("button.add_wait_ts", category=category_short("TS")))
         self.add_expected_response_button = QPushButton(tr("button.add_expected_response"))
 
         self.timeline_panel = TimelinePanel()
@@ -132,6 +182,13 @@ class MainWindow(QMainWindow):
         self.warnings_view.viewport().installEventFilter(self)
 
         self.log_panel = LogPanel(self.catalog)
+        self.packets_panel = PacketsPanel()
+
+        self.custom_message_sync = CustomMessageSync()
+
+        self.run_panel = RunPanel()
+        self.run_controller = RunController(self)
+        self.runner = None
 
         self._build_actions()
         self._build_menus()
@@ -139,8 +196,12 @@ class MainWindow(QMainWindow):
         self._configure_table_columns()
         self._configure_warnings_columns()
         self._connect_signals()
+        self.run_panel.apply_settings(app_settings.load_connection_settings())
+
         self.retranslate_ui()
         self._refresh_all_views()
+        self._mark_modified(False)
+        self._update_window_title()
         QTimer.singleShot(0, self._fill_table_width)
         QTimer.singleShot(0, self._fill_warnings_width)
 
@@ -152,11 +213,12 @@ class MainWindow(QMainWindow):
         self.export_packed_json_action = QAction(tr("action.export_packed_json"), self)
         self.export_generated_c_action = QAction(tr("action.export_generated_c"), self)
         self.import_logs_action = QAction(tr("action.import_logs"), self)
+        self.custom_messages_action = QAction(tr("action.message_catalog"), self)
 
-        self.add_ku_action = QAction(tr("action.add_ku"), self)
-        self.add_kt_action = QAction(tr("action.add_kt"), self)
+        self.add_ku_action = QAction(tr("action.add_ku", category=category_short("KU")), self)
+        self.add_kt_action = QAction(tr("action.add_kt", category=category_short("KT")), self)
         self.add_wait_action = QAction(tr("action.add_wait"), self)
-        self.add_wait_ts_action = QAction(tr("action.add_wait_ts"), self)
+        self.add_wait_ts_action = QAction(tr("action.add_wait_ts", category=category_short("TS")), self)
         self.add_expected_response_action = QAction(tr("action.add_expected_response"), self)
 
         self.delete_step_action = QAction(tr("action.delete_step"), self)
@@ -195,6 +257,8 @@ class MainWindow(QMainWindow):
         self.file_menu.addAction(self.import_logs_action)
 
         self.edit_menu = self.menuBar().addMenu(tr("menu.edit"))
+        self.edit_menu.addAction(self.custom_messages_action)
+        self.edit_menu.addSeparator()
         self.edit_menu.addAction(self.add_ku_action)
         self.edit_menu.addAction(self.add_kt_action)
         self.edit_menu.addAction(self.add_wait_action)
@@ -231,13 +295,21 @@ class MainWindow(QMainWindow):
         table_layout.addLayout(toolbar_layout)
         table_layout.addWidget(self.table_view)
 
+        bottom_container = QWidget()
+        bottom_layout = QVBoxLayout(bottom_container)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(0)
+        bottom_layout.addWidget(self.run_panel)
+
         self.bottom_tabs = QTabWidget()
         self.bottom_tabs.addTab(self.log_panel, tr("tab.logs"))
+        self.bottom_tabs.addTab(self.packets_panel, tr("tab.packets"))
         self.bottom_tabs.addTab(self.warnings_view, tr("tab.warnings"))
+        bottom_layout.addWidget(self.bottom_tabs)
 
         left_bottom_splitter = QSplitter(Qt.Orientation.Vertical)
         left_bottom_splitter.addWidget(table_container)
-        left_bottom_splitter.addWidget(self.bottom_tabs)
+        left_bottom_splitter.addWidget(bottom_container)
         left_bottom_splitter.setStretchFactor(0, 3)
         left_bottom_splitter.setStretchFactor(1, 2)
 
@@ -356,6 +428,7 @@ class MainWindow(QMainWindow):
         self.export_packed_json_action.triggered.connect(self._export_packed_json)
         self.export_generated_c_action.triggered.connect(self._export_generated_c)
         self.import_logs_action.triggered.connect(self._import_logs)
+        self.custom_messages_action.triggered.connect(self._edit_custom_messages)
         self.log_panel.import_requested.connect(self._import_logs)
         self.log_panel.clear_requested.connect(self._clear_logs)
         self.log_panel.start_live_requested.connect(self._start_live_logs)
@@ -388,29 +461,43 @@ class MainWindow(QMainWindow):
         self.inspector_panel.changed.connect(self._on_step_changed)
         self.timeline_panel.row_clicked.connect(self._on_timeline_row_clicked)
 
+        self.run_panel.connect_requested.connect(self._connect_transport)
+        self.run_panel.disconnect_requested.connect(self._disconnect_transport)
+        self.run_panel.run_requested.connect(self._start_run)
+        self.run_panel.pause_requested.connect(self.run_controller.pause)
+        self.run_panel.resume_requested.connect(self.run_controller.resume)
+        self.run_panel.stop_requested.connect(self.run_controller.stop)
+        self.run_panel.step_requested.connect(self._step_run)
+        self.run_controller.error.connect(self._on_transport_error)
+        self.run_controller.connection_changed.connect(self._on_connection_changed)
+
         self.language_ru_action.triggered.connect(lambda: self._set_ui_language("ru"))
         self.language_en_action.triggered.connect(lambda: self._set_ui_language("en"))
 
     def _new_document(self) -> None:
         self.document = ScenarioDocument(
-            schema_version=1,
-            metadata=ScenarioMetadata(name="Untitled scenario"),
+            schema_version=CURRENT_SCHEMA_VERSION,
+            metadata=ScenarioMetadata(name=tr("window.untitled")),
             validation=ValidationProfile(),
             steps=[],
         )
         self.current_path = None
         self.log_records = []
+        self._sync_custom_messages()
+        self.inspector_panel.reload_message_catalog()
         self.log_panel.set_records(self.log_records)
         self.table_model.set_document(self.document)
         self.inspector_panel.set_step(None)
         self._refresh_all_views()
+        self._document_modified = True
+        self._mark_modified(False)
 
     def _open_document(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
             self,
-            "Open scenario",
+            tr("dialog.open_scenario"),
             "",
-            "JSON files (*.json);;All files (*)",
+            _scenario_file_filter(),
         )
         if not path_str:
             return
@@ -418,11 +505,14 @@ class MainWindow(QMainWindow):
         try:
             loaded = load_scenario(path_str)
         except Exception as exc:
-            QMessageBox.critical(self, "Open failed", str(exc))
+            QMessageBox.critical(self, tr("dialog.open_failed_title"), str(exc))
             return
 
         self.document = loaded
         self.current_path = Path(path_str)
+        self._document_modified = True
+        self._sync_custom_messages()
+        self.inspector_panel.reload_message_catalog()
         self.log_records = []
         self.log_panel.set_records(self.log_records)
         self.table_model.set_document(self.document)
@@ -430,21 +520,24 @@ class MainWindow(QMainWindow):
         self._refresh_all_views()
 
     def _save_document(self) -> None:
+        self._commit_and_flush_edits()
+
         if self.current_path is None:
             self._save_document_as()
             return
 
         try:
             save_scenario(self.document, self.current_path)
+            self._mark_modified(False)
         except Exception as exc:
-            QMessageBox.critical(self, "Save failed", str(exc))
+            QMessageBox.critical(self, tr("dialog.save_failed_title"), str(exc))
 
     def _save_document_as(self) -> None:
         path_str, _ = QFileDialog.getSaveFileName(
             self,
-            "Save scenario",
+            tr("dialog.save_scenario"),
             "",
-            "JSON files (*.json);;All files (*)",
+            _scenario_file_filter(),
         )
         if not path_str:
             return
@@ -455,9 +548,9 @@ class MainWindow(QMainWindow):
     def _export_packed_json(self) -> None:
         path_str, _ = QFileDialog.getSaveFileName(
             self,
-            "Export packed scenario",
+            tr("dialog.export_packed_json"),
             "",
-            "JSON files (*.json);;All files (*)",
+            _scenario_file_filter(),
         )
         if not path_str:
             return
@@ -465,9 +558,11 @@ class MainWindow(QMainWindow):
         try:
             save_packed_scenario_export(self.document, path_str)
         except Exception as exc:
-            QMessageBox.critical(self, "Export failed", str(exc))
+            QMessageBox.critical(self, tr("dialog.export_packed_failed_title"), str(exc))
 
     def _export_generated_c(self) -> None:
+        self._commit_and_flush_edits()
+
         output_dir = QFileDialog.getExistingDirectory(
             self,
             tr("dialog.export_generated_c"),
@@ -483,6 +578,7 @@ class MainWindow(QMainWindow):
 
     def _set_ui_language(self, language: str) -> None:
         set_language(language)
+        app_settings.save_language(language)
         self.retranslate_ui()
 
         self.table_model.layoutChanged.emit()
@@ -508,7 +604,7 @@ class MainWindow(QMainWindow):
         self.timeline_panel.update()
 
     def retranslate_ui(self) -> None:
-        self.setWindowTitle(tr("app.title"))
+        self._update_window_title()
 
         self.new_action.setText(tr("action.new"))
         self.open_action.setText(tr("action.open"))
@@ -517,11 +613,12 @@ class MainWindow(QMainWindow):
         self.export_packed_json_action.setText(tr("action.export_packed_json"))
         self.export_generated_c_action.setText(tr("action.export_generated_c"))
         self.import_logs_action.setText(tr("action.import_logs"))
+        self.custom_messages_action.setText(tr("action.message_catalog"))
 
-        self.add_ku_action.setText(tr("action.add_ku"))
-        self.add_kt_action.setText(tr("action.add_kt"))
+        self.add_ku_action.setText(tr("action.add_ku", category=category_short("KU")))
+        self.add_kt_action.setText(tr("action.add_kt", category=category_short("KT")))
         self.add_wait_action.setText(tr("action.add_wait"))
-        self.add_wait_ts_action.setText(tr("action.add_wait_ts"))
+        self.add_wait_ts_action.setText(tr("action.add_wait_ts", category=category_short("TS")))
         self.add_expected_response_action.setText(tr("action.add_expected_response"))
 
         self.delete_step_action.setText(tr("action.delete_step"))
@@ -541,16 +638,19 @@ class MainWindow(QMainWindow):
         self.language_ru_action.setChecked(get_language() == "ru")
         self.language_en_action.setChecked(get_language() == "en")
 
-        self.add_ku_button.setText(tr("button.add_ku"))
-        self.add_kt_button.setText(tr("button.add_kt"))
+        self.add_ku_button.setText(tr("button.add_ku", category=category_short("KU")))
+        self.add_kt_button.setText(tr("button.add_kt", category=category_short("KT")))
         self.add_wait_button.setText(tr("button.add_wait"))
-        self.add_wait_ts_button.setText(tr("button.add_wait_ts"))
+        self.add_wait_ts_button.setText(tr("button.add_wait_ts", category=category_short("TS")))
         self.add_expected_response_button.setText(tr("button.add_expected_response"))
 
         self.bottom_tabs.setTabText(self.bottom_tabs.indexOf(self.log_panel), tr("tab.logs"))
+        self.bottom_tabs.setTabText(self.bottom_tabs.indexOf(self.packets_panel), tr("tab.packets"))
         self.bottom_tabs.setTabText(self.bottom_tabs.indexOf(self.warnings_view), tr("tab.warnings"))
+        self.packets_panel.retranslate_ui()
 
         self.log_panel.retranslate_ui()
+        self.run_panel.retranslate_ui()
         self.timeline_panel.retranslate_ui()
         self.inspector_panel.retranslate_ui()
 
@@ -574,7 +674,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 tr("dialog.expected_response_invalid_title"),
-                tr("dialog.expected_response_invalid_text"),
+                tr("dialog.expected_response_invalid_text", ku=category_short("KU"), kt=category_short("KT")),
             )
             return
 
@@ -583,7 +683,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 tr("dialog.expected_response_invalid_title"),
-                tr("dialog.expected_response_invalid_text"),
+                tr("dialog.expected_response_invalid_text", ku=category_short("KU"), kt=category_short("KT")),
             )
             return
 
@@ -662,9 +762,9 @@ class MainWindow(QMainWindow):
     def _import_logs(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
             self,
-            "Import logs",
+            tr("dialog.import_logs"),
             "",
-            "JSON files (*.json);;All files (*)",
+            _log_file_filter(),
         )
         if not path_str:
             return
@@ -672,7 +772,7 @@ class MainWindow(QMainWindow):
         try:
             self.log_records = load_log_records(path_str)
         except Exception as exc:
-            QMessageBox.critical(self, "Import logs failed", str(exc))
+            QMessageBox.critical(self, tr("dialog.import_logs_failed_title"), str(exc))
             return
 
         self._refresh_all_views()
@@ -681,16 +781,10 @@ class MainWindow(QMainWindow):
         self.log_records = []
         self._refresh_all_views()
 
-    def _start_live_logs(self, port1: str, port2: str, baud: int) -> None:
+    def _start_live_logs(self, port: str, baud: int) -> None:
         self._stop_live_logs()
 
-        ports = []
-        if port1:
-            ports.append(port1)
-        if port2 and port2 != port1:
-            ports.append(port2)
-
-        if not ports:
+        if not port:
             self.log_panel.set_live_status_text(
                 tr("status.live_prefix", text=tr("live.status.no_ports"))
             )
@@ -700,13 +794,14 @@ class MainWindow(QMainWindow):
             tr("status.live_prefix", text=tr("live.status.starting"))
         )
 
-        for port in ports:
-            controller = SerialLogController(port=port, baudrate=baud)
-            controller.record_received.connect(self._append_live_log_record)
-            controller.status_changed.connect(self._on_live_status_message)
-            controller.error_occurred.connect(self._on_live_error_message)
-            self._serial_controllers.append(controller)
-            controller.start()
+        # One port: what the host sends is logged by the runner itself, so a second capture
+        # channel for the sender is not needed.
+        controller = SerialLogController(port=port, baudrate=baud)
+        controller.record_received.connect(self._append_live_log_record)
+        controller.status_changed.connect(self._on_live_status_message)
+        controller.error_occurred.connect(self._on_live_error_message)
+        self._serial_controllers.append(controller)
+        controller.start()
 
     def _stop_live_logs(self) -> None:
         for controller in self._serial_controllers:
@@ -1067,9 +1162,219 @@ class MainWindow(QMainWindow):
     def _on_timeline_row_clicked(self, row: int) -> None:
         self._select_row(row)
 
+    # -- live execution ----------------------------------------------------------------
+
+    # -- user-defined messages ---------------------------------------------------------
+
+    def _sync_custom_messages(self) -> None:
+        """Publish the document's own messages so the rest of the tool can see them."""
+        rejected = self.custom_message_sync.apply(
+            self.document.custom_messages, self.document.suppressed_messages
+        )
+        for spec in rejected:
+            self.document.migration_notes.append(
+                _Note("custom.shadows_catalogue", None, {"msg": f"0x{spec.msg_id:04X}"})
+            )
+
+    def _edit_custom_messages(self) -> None:
+        dialog = MessageCatalogDialog(
+            self.document.custom_messages, self.document.suppressed_messages, self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self.document.custom_messages = dialog.specs
+        self.document.suppressed_messages = dialog.suppressed
+        self._sync_custom_messages()
+        self.inspector_panel.reload_message_catalog()
+        self._mark_modified(True)
+        self._refresh_all_views()
+
+    def _connect_transport(self, settings: ConnectionSettings) -> None:
+        if self.run_controller.connect_to(settings):
+            app_settings.save_connection_settings(settings)
+            self.log_panel.set_live_status_text(
+                tr("transport.connected", description=settings.describe())
+            )
+
+    def _disconnect_transport(self) -> None:
+        self.run_controller.disconnect()
+        self.log_panel.set_live_status_text(tr("transport.disconnected"))
+
+    def _on_connection_changed(self, connected: bool) -> None:
+        # A fresh connection is a fresh decision: confirming once must not arm every later one.
+        self._live_run_confirmed = False
+        self.run_panel.set_connected(connected, simulated=self.run_controller.is_simulated)
+        self.run_panel.set_run_state("idle")
+
+    def _on_transport_error(self, text: str) -> None:
+        QMessageBox.critical(self, tr("dialog.transport_failed_title"), text)
+
+    def _confirm_live_run(self) -> bool:
+        """Nothing reaches hardware without an explicit yes, once per connection."""
+        if self.run_controller.is_simulated or self._live_run_confirmed:
+            return True
+
+        answer = QMessageBox.question(
+            self,
+            tr("dialog.live_confirm_title"),
+            tr("dialog.live_confirm_text", description=self.run_controller.settings.describe()),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        self._live_run_confirmed = answer == QMessageBox.StandardButton.Yes
+        return self._live_run_confirmed
+
+    def _prepare_run(self):
+        self._commit_and_flush_edits()
+        if not self._confirm_live_run():
+            return None
+
+        runner = self.run_controller.start_run(
+            self.document,
+            stop_on_failure=self.run_panel.stop_on_failure(),
+            send_telemetry_commands=self.run_panel.send_telemetry_commands(),
+        )
+        if runner is None:
+            return None
+
+        self.runner = runner
+        self._run_statuses = {}
+        runner.message_sent.connect(self._on_run_record)
+        runner.message_received.connect(self._on_run_record)
+        runner.step_started.connect(self._on_run_step_started)
+        runner.step_finished.connect(self._on_run_step_finished)
+        runner.bus_error.connect(self._on_bus_error)
+        runner.state_changed.connect(self.run_panel.set_run_state)
+        runner.run_finished.connect(self._on_run_finished)
+        return runner
+
+    def _start_run(self) -> None:
+        self._prepare_run()
+
+    def _step_run(self) -> None:
+        runner = self.runner
+        if runner is not None and runner.state is RunState.PAUSED:
+            runner.step_once()
+            return
+        runner = self._prepare_run()
+        if runner is not None:
+            runner.step_once()
+
+    def _note_expected_packets(self, record: LogRecord) -> None:
+        """§4.2 note 1: the acknowledgement of CMD_DUMP carries the packet count in bytes 5-7."""
+        if record.direction != "rx" or record.msg_id != 0x0201:
+            return
+
+        spec = registry.find("TS", 0x0201)
+        if spec is None:
+            return
+
+        values = unpack_message(spec, record.payload)
+        if values.get("acknowledged_msg_id") != 0x0006 or values.get("rejected"):
+            return
+
+        count = values.get("packet_count")
+        if isinstance(count, int) and count != 0xAAAAAA:
+            self.packets_panel.set_expected_packets(count)
+
+    def _on_run_record(self, record: LogRecord) -> None:
+        self._note_expected_packets(record)
+        self.log_records.append(record)
+        if self._live_session_file is not None:
+            self._live_session_file.write(format_log_record_line(record) + "\n")
+            self._live_session_file.flush()
+        self._schedule_live_refresh()
+
+    def _on_run_step_started(self, row: int) -> None:
+        self._run_statuses[row] = "current"
+        self._apply_run_statuses()
+
+    def _on_run_step_finished(self, row: int, outcome: str, detail: str) -> None:
+        self._run_statuses[row] = {
+            "ok": "ok",
+            "skipped": "neutral",
+            "timeout": "error",
+            "rejected": "error",
+            "error": "error",
+        }.get(outcome, "warning")
+        if detail:
+            self._step_execution_details[row] = detail
+        self._apply_run_statuses()
+
+    def _apply_run_statuses(self) -> None:
+        self.table_model.set_row_statuses(self._run_statuses)
+        self.timeline_panel.set_document(self.document, row_statuses=self._run_statuses)
+
+    def _on_bus_error(self, error) -> None:
+        msg_id = getattr(error, "failed_msg_id", None) or getattr(error, "msg_id", None)
+        code = getattr(error, "known_code", None) or getattr(error, "code", None)
+        self.log_panel.set_live_status_text(
+            tr(
+                "transport.bus_error",
+                msg=f"0x{msg_id:04X}" if isinstance(msg_id, int) else "?",
+                code=tr(code.label_key) if hasattr(code, "label_key") else str(code),
+            )
+        )
+
+    def _on_run_finished(self, summary) -> None:
+        self.run_panel.set_status_text(
+            tr(
+                "transport.summary",
+                done=summary.steps_done,
+                total=summary.steps_total,
+                failures=summary.failures,
+            )
+        )
+
     def _on_step_changed(self) -> None:
+        # Fired on every keystroke in the inspector. A full refresh re-runs validation, rebuilds
+        # the timeline scene and re-matches every log record, so coalesce bursts into one pass.
+        self._schedule_step_refresh()
+
+    def _schedule_step_refresh(self) -> None:
+        if self._step_refresh_pending:
+            return
+
+        self._step_refresh_pending = True
+        QTimer.singleShot(0, self._apply_step_refresh)
+
+    def _apply_step_refresh(self) -> None:
+        self._step_refresh_pending = False
+        self._mark_modified(True)
         self.table_model.refresh()
         self._refresh_all_views()
+
+    def flush_pending_refresh(self) -> None:
+        """Run any coalesced refresh immediately (used by tests and before save/export).
+
+        Both the edit refresh and the live-log refresh are deferred through timers, so both have
+        to be drained or the views lag behind the document.
+        """
+        if self._step_refresh_pending:
+            self._apply_step_refresh()
+        if self._live_refresh_pending:
+            self._apply_live_refresh()
+
+    def _update_window_title(self) -> None:
+        name = self.current_path.name if self.current_path else tr("window.untitled")
+        key = "window.title_modified" if self._document_modified else "window.title"
+        self.setWindowTitle(tr(key, name=name, app=tr("app.title")))
+
+    def _mark_modified(self, modified: bool = True) -> None:
+        if self._document_modified == modified:
+            return
+        self._document_modified = modified
+        self._update_window_title()
+
+    def _commit_and_flush_edits(self) -> None:
+        """Make sure what is on screen is in the document before it is written out.
+
+        Spin boxes commit on Enter or focus loss, so a value typed and then saved straight from
+        the menu would otherwise not make it into the file.
+        """
+        self.inspector_panel.commit_pending_edits()
+        self.flush_pending_refresh()
 
     def _build_row_statuses(self, diagnostics) -> dict[int, str]:
         priority = {
@@ -1237,16 +1542,18 @@ class MainWindow(QMainWindow):
 
                 expected_direction = "tx"
                 expected_category = step.message.category
+                expected_category_label = category_short(expected_category)
                 expected_msg_id = step.message.msg_id
                 expected_sources = {"board", ""}
 
             else:
                 if step.expected is None or step.expected.msg_id is None:
-                    step_details[row_index] = tr("execution.no_expected_ts")
+                    step_details[row_index] = tr("execution.no_expected_ts", category=category_short("TS"))
                     continue
 
                 expected_direction = "rx"
                 expected_category = step.expected.category
+                expected_category_label = category_short(expected_category)
                 expected_msg_id = step.expected.msg_id
                 expected_sources = {"detector", ""}
 
@@ -1273,7 +1580,7 @@ class MainWindow(QMainWindow):
                             "execution.current_waiting_send",
                             step=row_index + 1,
                             direction=tr(f"log.direction.{expected_direction}"),
-                            category=expected_category,
+                            category=expected_category_label,
                             msg_id=expected_msg_id,
                         )
                     else:
@@ -1281,7 +1588,7 @@ class MainWindow(QMainWindow):
                             "execution.current_waiting_ts",
                             step=row_index + 1,
                             direction=tr(f"log.direction.{expected_direction}"),
-                            category=expected_category,
+                            category=expected_category_label,
                             msg_id=expected_msg_id,
                         )
                     current_step_row = row_index
@@ -1294,11 +1601,11 @@ class MainWindow(QMainWindow):
                     "execution.first_mismatch",
                     step=row_index + 1,
                     direction=tr(f"log.direction.{expected_direction}"),
-                    category=expected_category,
+                    category=expected_category_label,
                     msg_id=expected_msg_id,
                     log_row=next_log_index + 1,
                     got_direction=tr(f"log.direction.{next_record.direction}"),
-                    got_category=next_record.category,
+                    got_category=category_short(next_record.category),
                     got_msg_id=next_record.msg_id,
                     source=normalize_log_source(next_record.source) or tr("log.source.empty"),
                     time=next_record.timestamp_ms,
@@ -1316,7 +1623,7 @@ class MainWindow(QMainWindow):
                         step=row_index + 1,
                         log_row=i + 1,
                         direction=tr(f"log.direction.{extra.direction}"),
-                        category=extra.category,
+                        category=category_short(extra.category),
                         msg_id=extra.msg_id,
                         source=normalize_log_source(extra.source) or tr("log.source.empty"),
                         time=extra.timestamp_ms,
@@ -1339,7 +1646,7 @@ class MainWindow(QMainWindow):
                         step=row_index + 1,
                         log_row=match_index + 1,
                         direction=tr(f"log.direction.{record.direction}"),
-                        category=record.category,
+                        category=category_short(record.category),
                         msg_id=record.msg_id,
                         source=record_source or tr("log.source.empty"),
                         time=record.timestamp_ms,
@@ -1347,7 +1654,7 @@ class MainWindow(QMainWindow):
                     log_details[match_index] = tr(
                         "execution.matched_to_step",
                         step=row_index + 1,
-                        category=expected_category,
+                        category=expected_category_label,
                         msg_id=expected_msg_id,
                     )
                 else:
@@ -1356,7 +1663,7 @@ class MainWindow(QMainWindow):
                         step=row_index + 1,
                         log_row=match_index + 1,
                         direction=tr(f"log.direction.{record.direction}"),
-                        category=record.category,
+                        category=category_short(record.category),
                         msg_id=record.msg_id,
                         source=record_source or tr("log.source.empty"),
                         time=record.timestamp_ms,
@@ -1364,7 +1671,7 @@ class MainWindow(QMainWindow):
                     log_details[match_index] = tr(
                         "execution.matched_to_wait_ts",
                         step=row_index + 1,
-                        category=expected_category,
+                        category=expected_category_label,
                         msg_id=expected_msg_id,
                     )
             else:
@@ -1391,7 +1698,7 @@ class MainWindow(QMainWindow):
                     "execution.unmatched_log",
                     log_row=i + 1,
                     direction=tr(f"log.direction.{rec.direction}"),
-                    category=rec.category,
+                    category=category_short(rec.category),
                     msg_id=rec.msg_id,
                     source=rec_source or tr("log.source.empty"),
                     time=rec.timestamp_ms,
@@ -1498,7 +1805,7 @@ class MainWindow(QMainWindow):
 
         self.log_panel.set_records(self.log_records)
 
-        diagnostics = analyze_scenario(self.document)
+        diagnostics = _migration_diagnostics(self.document) + analyze_scenario(self.document)
         self.warnings_model.set_items(diagnostics)
         self.warnings_view.resizeRowsToContents()
         self._fill_warnings_width()
@@ -1530,8 +1837,11 @@ class MainWindow(QMainWindow):
             step_details,
         )
 
-        self.log_panel.set_matched_rows(set(log_to_step.keys()))
-        self.log_panel.set_problem_rows(problem_rows)
+        self.log_panel.update_annotations(
+            matched_rows=set(log_to_step.keys()),
+            problem_rows=problem_rows,
+            row_tooltips=log_details,
+        )
         self.log_panel.set_summary_text(
             self._build_execution_summary(
                 step_to_log,
@@ -1540,7 +1850,6 @@ class MainWindow(QMainWindow):
                 first_mismatch_row,
             )
         )
-        self.log_panel.set_row_tooltips(log_details)
 
         indexes = self.table_view.selectionModel().selectedRows()
         if indexes:

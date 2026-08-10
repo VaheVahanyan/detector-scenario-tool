@@ -1,148 +1,128 @@
+"""Mode tracking across a scenario.
+
+The allowed-command matrix is not written out here any more: it comes from
+`MessageDef.allowed_modes`, which is filled straight from the specification's validity table.
+
+Limitation, unchanged from the previous implementation: long modes (`ERASE`, `TEST`, `DUMP`) end on
+an internal completion event the scenario cannot see, so the model keeps the scenario in that mode
+until an explicit `CMD_DUTY` / `CMD_SHUTDOWN`. Commands rejected only because of that assumption are
+reported as warnings, never errors.
+"""
+
 from __future__ import annotations
 
-from enum import Enum
-
-from detector_scenario_tool.domain.scenario import (
-    ScenarioDocument,
-    SendMessageStep,
-)
+from detector_scenario_tool.domain.scenario import ScenarioDocument, SendMessageStep
+from detector_scenario_tool.protocol import registry
+from detector_scenario_tool.protocol.modes import Mode
 from detector_scenario_tool.validation.diagnostics import Diagnostic, Severity
 
-
-class NaMode(str, Enum):
-    STANDBY = "standby"  # режим 1
-    ERASE = "erase"  # режим 2
-    TEST = "test"  # режим 3
-    OBSERVATION = "observation"  # режим 4
-    DATA_OUTPUT = "data_output"  # режим 5
-    EMERGENCY = "emergency"  # режим 6
-    POWER_OFF = "power_off"  # режим 7
+#: Kept as a module-level view so tests and tooling can read the matrix without walking the
+#: registry themselves.
+ALLOWED_KU_BY_MODE: dict[Mode, set[int]] = {}
+KT_ALLOWED_MODES: set[Mode] = set()
 
 
-MODE_LABELS: dict[NaMode, str] = {
-    NaMode.STANDBY: "дежурный режим",
-    NaMode.ERASE: "режим стирания ППЗУ",
-    NaMode.TEST: "режим тестирования ППЗУ",
-    NaMode.OBSERVATION: "режим наблюдений",
-    NaMode.DATA_OUTPUT: "режим вывода данных",
-    NaMode.EMERGENCY: "аварийный режим",
-    NaMode.POWER_OFF: "режим выключения",
-}
+def _rebuild_matrices() -> None:
+    ALLOWED_KU_BY_MODE.clear()
+    for mode in Mode:
+        ALLOWED_KU_BY_MODE[mode] = {
+            spec.msg_id
+            for spec in registry.by_category("KU")
+            if mode in spec.allowed_modes
+        }
 
-# MSG_ID -> допустимость по режимам 1..7
-# Основано на таблице 5.2.10 протокола.
-ALLOWED_KU_BY_MODE: dict[NaMode, set[int]] = {
-    NaMode.STANDBY: {
-        0x0000, 0x0001, 0x0002, 0x0003, 0x0006, 0x0007, 0x0008, 0x0009,
-        0x000A, 0x000B,
-    },
-    NaMode.ERASE: {
-        0x0001, 0x0005, 0x0006, 0x000B,
-    },
-    NaMode.TEST: {
-        0x0001, 0x0005, 0x0006, 0x000B,
-    },
-    NaMode.OBSERVATION: {
-        0x0000, 0x0001, 0x0004, 0x0005, 0x000B,
-    },
-    NaMode.DATA_OUTPUT: {
-        0x0001, 0x0005, 0x000B,
-    },
-    NaMode.EMERGENCY: {
-        0x0000, 0x0001, 0x0007, 0x0008, 0x000B, 0x000C,
-    },
-    NaMode.POWER_OFF: {
-        0x0001,
-    },
-}
+    KT_ALLOWED_MODES.clear()
+    for spec in registry.by_category("KT"):
+        KT_ALLOWED_MODES.update(spec.allowed_modes)
 
-KT_ALLOWED_MODES: set[NaMode] = {
-    NaMode.OBSERVATION,
-}
 
-TARGET_MODE_BY_KU: dict[int, NaMode] = {
-    0x0003: NaMode.OBSERVATION,
-    0x0006: NaMode.DATA_OUTPUT,
-    0x0008: NaMode.ERASE,
-    0x0009: NaMode.TEST,
-    0x000B: NaMode.POWER_OFF,
-}
+_rebuild_matrices()
+
+
+def refresh() -> None:
+    """Re-read the registry, e.g. after a user-defined message was registered."""
+    _rebuild_matrices()
 
 
 def analyze_modes(document: ScenarioDocument) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
+    current_mode = Mode.DUTY
 
-    current_mode = NaMode.STANDBY
-
-    for i, step in enumerate(document.steps):
-        if not isinstance(step, SendMessageStep):
+    for index, step in enumerate(document.steps):
+        if not isinstance(step, SendMessageStep) or not step.enabled:
             continue
-
         if step.message is None or step.message.msg_id is None:
             continue
 
-        category = step.message.category
-        msg_id = step.message.msg_id
+        spec = registry.find(step.message.category, step.message.msg_id)
+        if spec is None:
+            continue
 
-        if category == "KU":
-            allowed = ALLOWED_KU_BY_MODE.get(current_mode, set())
-            if msg_id not in allowed:
-                diagnostics.append(
-                    Diagnostic(
-                        severity=Severity.WARNING,
-                        step_index=i,
-                        code="mode.ku_not_allowed",
-                        message=(
-                            f"КУ 0x{msg_id:04X} '{step.message.name}' "
-                            f"недопустима в режиме '{MODE_LABELS[current_mode]}'."
-                        ),
-                    )
-                )
-
-            # Дополнительная явная проверка: переходы в 2/3/4/5 только из дежурного режима.
-            if msg_id in (0x0003, 0x0006, 0x0008, 0x0009) and current_mode != NaMode.STANDBY:
-                diagnostics.append(
-                    Diagnostic(
-                        severity=Severity.WARNING,
-                        step_index=i,
-                        code="mode.target_mode_requires_standby",
-                        message=(
-                            f"КУ 0x{msg_id:04X} '{step.message.name}' "
-                            f"обычно должна запускаться из дежурного режима, "
-                            f"а сейчас сценарий находится в режиме '{MODE_LABELS[current_mode]}'."
-                        ),
-                    )
-                )
-
-            current_mode = _apply_mode_transition(current_mode, msg_id)
-
-        elif category == "KT":
-            if current_mode not in KT_ALLOWED_MODES:
-                diagnostics.append(
-                    Diagnostic(
-                        severity=Severity.WARNING,
-                        step_index=i,
-                        code="mode.kt_ignored",
-                        message=(
-                            f"КТ 0x{msg_id:04X} '{step.message.name}' "
-                            f"в режиме '{MODE_LABELS[current_mode]}' игнорируется НА."
-                        ),
-                    )
-                )
+        if current_mode not in spec.allowed_modes:
+            diagnostics.append(
+                _not_allowed_diagnostic(spec, index, current_mode)
+            )
+        else:
+            current_mode = _apply_transition(current_mode, spec)
 
     return diagnostics
 
 
-def _apply_mode_transition(current_mode: NaMode, msg_id: int) -> NaMode:
-    # Явные переходы по КУ
-    if msg_id == 0x0005:
-        return NaMode.STANDBY
+def _not_allowed_diagnostic(spec, index: int, mode: Mode) -> Diagnostic:
+    if spec.category == "KT":
+        # КТ are silently dropped by the НА — no acknowledgement comes back at all, so a
+        # scenario that sends one outside OBSERVE simply loses the data.
+        return Diagnostic(
+            severity=Severity.WARNING,
+            step_index=index,
+            code="mode.kt_ignored",
+            params={
+                "msg": f"0x{spec.msg_id:04X}",
+                "symbol": spec.symbol,
+                "mode_key": mode.label_key,
+            },
+        )
 
-    if msg_id in TARGET_MODE_BY_KU:
-        return TARGET_MODE_BY_KU[msg_id]
+    return Diagnostic(
+        severity=Severity.ERROR,
+        step_index=index,
+        code="mode.ku_not_allowed",
+        params={
+            "msg": f"0x{spec.msg_id:04X}",
+            "symbol": spec.symbol,
+            "mode_key": mode.label_key,
+        },
+    )
 
-    if msg_id == 0x000C and current_mode == NaMode.EMERGENCY:
-        # Сброс аварийного статуса из аварийного режима логически возвращает в режим 1.
-        return NaMode.STANDBY
+
+def _apply_transition(current_mode: Mode, spec) -> Mode:
+    if spec.changes_mode_to is not None:
+        return spec.changes_mode_to
+
+    if spec.symbol == "CMD_RESET_ALARM" and current_mode is Mode.ALARM:
+        # §9.13: leaves ALARM only when MaskedAlarm ends up zero. A scenario cannot know the
+        # hardware state, so assume the optimistic path — that is the case worth validating.
+        return Mode.DUTY
+
+    return current_mode
+
+
+def mode_at_step(document: ScenarioDocument, step_index: int) -> Mode:
+    """The mode the scenario is in when `step_index` executes."""
+    current_mode = Mode.DUTY
+
+    for index, step in enumerate(document.steps):
+        if index >= step_index:
+            break
+        if not isinstance(step, SendMessageStep) or not step.enabled:
+            continue
+        if step.message is None or step.message.msg_id is None:
+            continue
+
+        spec = registry.find(step.message.category, step.message.msg_id)
+        if spec is None or current_mode not in spec.allowed_modes:
+            continue
+
+        current_mode = _apply_transition(current_mode, spec)
 
     return current_mode

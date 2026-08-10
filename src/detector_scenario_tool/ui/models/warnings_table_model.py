@@ -60,10 +60,32 @@ class WarningsTableModel(QAbstractTableModel):
             if col == 0:
                 return tr(f"severity.{item.severity.value}")
             if col == 1:
-                return str(item.step_index + 1)
+                return "-" if item.step_index < 0 else str(item.step_index + 1)
             if col == 2:
                 return item.code
             if col == 3:
-                return item.message
+                return render_diagnostic(item)
 
         return None
+
+
+def render_diagnostic(item: Diagnostic) -> str:
+    """Format a diagnostic in the current language.
+
+    Diagnostics carry a code and parameters rather than a finished string, so the warnings panel
+    re-renders correctly after a language switch.
+    """
+    key = f"diag.{item.code}"
+    text = tr(key, **item.params) if item.params else tr(key)
+
+    if text != key:
+        return text
+
+    # No translation for this code yet: fall back to whatever the producer supplied, then to a
+    # readable dump of the parameters, so a new rule is never invisible.
+    if item.message:
+        return item.message
+    if item.params:
+        params = ", ".join(f"{k}={v}" for k, v in item.params.items())
+        return f"{item.code} ({params})"
+    return item.code

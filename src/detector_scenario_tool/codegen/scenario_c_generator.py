@@ -86,13 +86,24 @@ def _generate_header_text(include_guard: str) -> str:
 #ifndef {include_guard}
 #define {include_guard}
 
+#include <stdint.h>
+
 #include "scenario_runtime.h"
 
 #ifdef __cplusplus
 extern "C" {{
 #endif
 
+/* Executes the linear scenario once. */
 scenario_result_t scenario_run_once(void);
+
+/*
+ * Messages the runtime must keep re-sending for as long as the scenario runs.
+ * The linear sequence sends each of them once; repeating them is the board's job, because the
+ * board is what holds the cadence in flight.
+ */
+extern const scenario_cyclic_t scenario_cyclic_table[];
+extern const uint32_t          scenario_cyclic_count;
 
 #ifdef __cplusplus
 }}
@@ -100,6 +111,49 @@ scenario_result_t scenario_run_once(void);
 
 #endif /* {include_guard} */
 """
+
+
+def _cyclic_entries(document: ScenarioDocument) -> list[tuple[int, SendMessageStep]]:
+    return [
+        (index, step)
+        for index, step in enumerate(document.steps, start=1)
+        if isinstance(step, SendMessageStep)
+        and getattr(step, "enabled", True)
+        and step.repeats
+        and step.message is not None
+        and step.message.msg_id is not None
+    ]
+
+
+def _emit_cyclic_table(document: ScenarioDocument) -> list[str]:
+    entries = _cyclic_entries(document)
+
+    lines = [
+        "/*",
+        " * Periodic sends. The runtime should start these when the scenario starts and stop them",
+        " * when it ends; payload bytes are the ones the corresponding linear step carries.",
+        " */",
+        "const scenario_cyclic_t scenario_cyclic_table[] =",
+        "{",
+    ]
+
+    if not entries:
+        # A zero-length array is not valid C, so keep one inert entry and a count of zero.
+        lines.append("    { 0u, 0u, 0u }, /* none: scenario_cyclic_count is 0 */")
+    else:
+        for index, step in entries:
+            policy = step.cyclic
+            max_repeats = 0 if policy.max_repeats is None else policy.max_repeats
+            lines.append(
+                f"    {{ 0x{step.message.msg_id:04X}u, {policy.period_ms}u, {max_repeats}u }},"
+                f" /* step {index} */"
+            )
+
+    lines.append("};")
+    lines.append("")
+    lines.append(f"const uint32_t scenario_cyclic_count = {len(entries)}u;")
+    lines.append("")
+    return lines
 
 
 def _generate_source_text(document: ScenarioDocument, header_filename: str) -> str:
@@ -135,11 +189,14 @@ def _generate_source_text(document: ScenarioDocument, header_filename: str) -> s
 
     body = "\n".join(body_lines).rstrip()
 
+    cyclic_table = "\n".join(_emit_cyclic_table(document))
+
     return f"""#include <stdint.h>
 
 #include "{header_filename}"
 #include "scenario_runtime.h"
 
+{cyclic_table}
 scenario_result_t scenario_run_once(void)
 {{
     scenario_result_t rc;
@@ -152,6 +209,24 @@ scenario_result_t scenario_run_once(void)
     return SCENARIO_OK;
 }}
 """
+
+
+def _custom_meta(step: SendMessageStep) -> str:
+    """Mark a user-defined message: the board has no field layout for it, only raw bytes."""
+    from detector_scenario_tool.protocol import registry
+
+    if step.message is None or step.message.msg_id is None:
+        return ""
+    spec = registry.find(step.message.category, step.message.msg_id)
+    return "custom=true | " if spec is not None and spec.custom else ""
+
+
+def _cyclic_meta(step: SendMessageStep) -> str:
+    """Repeats are board-side behaviour, so the meta file has to say so explicitly."""
+    if not step.repeats:
+        return "cyclic=false | "
+    repeats = "unlimited" if step.cyclic.max_repeats is None else step.cyclic.max_repeats
+    return f"cyclic=true | cyclic_period_ms={step.cyclic.period_ms} | cyclic_max={repeats} | "
 
 
 def _generate_meta_text(
@@ -189,6 +264,7 @@ def _generate_meta_text(
                 line = (
                     f"{step_index:03d} | {enabled_text} | SEND {step.message.category} "
                     f"0x{step.message.msg_id:04X} | payload_len={payload_len} | "
+                    f"{_cyclic_meta(step)}{_custom_meta(step)}"
                     f"ack_policy={step.ack_policy.value} | "
                     f"ack_timeout_ms={step.ack_timeout_ms if step.ack_timeout_ms is not None else '-'} | "
                     f"attempts={retry.attempts} | "
@@ -301,15 +377,41 @@ UI scenario is richer than generated C:
   - SEND_KT
   - WAIT_TIME
 - WAIT_FOR_TS steps are UI-only and are NOT emitted as executable code.
+- User-defined messages are emitted exactly like catalogue ones: the generated table carries the
+  raw bytes, and the meta file marks the step `custom=true`. The board runtime needs no knowledge
+  of them beyond the MSG_ID and the payload.
+- Cyclic sends are NOT unrolled into the linear step list. A step marked `cyclic=true` in the
+  meta file is sent once by the linear sequence, and the board runtime is expected to keep
+  repeating it at `cyclic_period_ms` until the scenario ends. See "Cyclic sends" below.
 - Board runtime is responsible for waiting for all protocol responses
   (ACK, STATUS, TELEMETRY, TEST_RESULT, etc.) after each command.
+
+Cyclic sends
+------------
+
+Telemetry commands (КТ) are pushed repeatedly by the БВС for the whole observation session
+(Протокол_CAN_ГС_v2 §3, and the 20 s cadence in the algorithm description). The generated
+sequence therefore sends such a message once and expects the runtime to register a periodic task:
+
+typedef struct
+{{
+    uint16_t msg_id;
+    uint32_t period_ms;
+    uint32_t max_repeats;   /* 0 = until the scenario ends */
+}} scenario_cyclic_t;
+
+extern const scenario_cyclic_t scenario_cyclic_table[];
+extern const uint32_t          scenario_cyclic_count;
+
+The runtime should start these when the scenario starts and stop them when it ends. Payload bytes
+for each entry are the ones the linear step already carries.
 
 Required runtime API
 --------------------
 
 The generated code expects the following runtime API contract:
 
-#define SCENARIO_MAX_PAYLOAD_LEN 6144u
+#define SCENARIO_MAX_PAYLOAD_LEN 6146u
 #define SCENARIO_LOG_SRC        "board"
 
 typedef enum
@@ -413,19 +515,25 @@ Generated code assumes protocol/event logging is available in the runtime layer.
 
 Recommended UART log line format:
 
-DSTLOG|v=1|src=board|ts=<ms>|dir=<tx|rx>|id=<hex4>|data=<HEX>
+DSTLOG|v=2|src=board|ts=<ms>|dir=<tx|rx>|id=<hex4>|data=<HEX>[|can=<hex3>][|frames=<n>][|valid=0]
 
 Examples:
-DSTLOG|v=1|src=board|ts=120|dir=tx|id=0003|data=010203040506
-DSTLOG|v=1|src=board|ts=257|dir=rx|id=0201|data=000000000000
+DSTLOG|v=2|src=board|ts=120|dir=tx|id=0003|data=010203040506|can=0BE
+DSTLOG|v=2|src=board|ts=257|dir=rx|id=0201|data=000000000000|can=3C5
 
 Where:
 - src=board for board-side runtime logs
 - src=detector for detector-side runtime logs
+- src=host for lines the desktop tool produced itself
 - dir=tx when board sends a message
 - dir=rx when board receives a protocol response
 - id is message id in 4-digit hex
 - data is payload hex without spaces
+- can is the CAN identifier of the first frame, optional
+- frames is the number of CAN frames a long message occupied, omitted when 1
+- valid=0 marks a frame that could not be reassembled, omitted otherwise
+
+v=1 lines (no can/frames/valid) are still accepted by the desktop tool.
 
 Generated code itself should only call:
 - scenario_log_scenario_started()
@@ -448,6 +556,18 @@ Expected behavior:
 - Does not contain infinite loop.
 - Repeat policy is controlled by outer application logic.
 
+User-defined messages
+---------------------
+
+A scenario may define its own messages: a MSG_ID, a length and raw content bytes, with no field
+structure. They are emitted exactly like catalogue messages — the generated table carries the
+bytes and the meta file marks the step `custom=true`. The runtime needs no knowledge of them
+beyond the MSG_ID and the payload, and should not attempt to validate them.
+
+Such a message may also carry its own destination and source addresses, so that a scenario can
+deliberately put traffic on the bus that is not addressed to the payload. When those are present
+the meta file records them; a runtime that only ever talks to one peer can ignore them.
+
 Generation rules
 ----------------
 
@@ -458,8 +578,10 @@ Generation rules
    - SEND_KU
    - SEND_KT
    - WAIT_TIME
+   - the cyclic table (data only; the runtime drives it)
 5. WAIT_FOR_TS remains only at UI / validation / log-matching level.
 6. Generated code should contain only:
+   - const scenario_cyclic_t scenario_cyclic_table[] = {{ ... }};
    - static const uint8_t payload[] = {{ ... }};
    - scenario_send_ku(...)
    - scenario_send_kt(...)

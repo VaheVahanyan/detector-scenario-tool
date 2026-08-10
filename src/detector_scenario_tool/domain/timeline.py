@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from detector_scenario_tool.i18n import tr
+from detector_scenario_tool.utils.labels import category_short, message_code, message_label
 from detector_scenario_tool.domain.scenario import (
     ScenarioDocument,
     SendMessageStep,
@@ -24,6 +26,8 @@ class TimelineItem:
     subtitle: str
     tooltip: str
     status: str  # "neutral" | "ok" | "error" | "warning" | "pending"
+    #: Repeat period in ms for a cyclic send, so the view can mark the cadence. 0 means one shot.
+    repeat_period_ms: int = 0
 
 
 @dataclass
@@ -62,6 +66,9 @@ def build_timeline(
                     subtitle=subtitle,
                     tooltip=tooltip,
                     status=row_statuses.get(row_index, "neutral"),
+                    repeat_period_ms=(
+                        step.cyclic.period_ms if step.repeats else 0
+                    ),
                 )
             )
             cursor_ms += duration_ms
@@ -94,9 +101,9 @@ def build_timeline(
                     lane="wait",
                     start_ms=cursor_ms,
                     duration_ms=duration_ms,
-                    title="WAIT",
-                    subtitle=f"{step.delay_ms} ms",
-                    tooltip=f"WAIT {step.delay_ms} ms",
+                    title=tr("timeline.wait"),
+                    subtitle=tr("scenario.step.ms", value=step.delay_ms),
+                    tooltip=f'{tr("timeline.wait")} {tr("scenario.step.ms", value=step.delay_ms)}',
                     status=row_statuses.get(row_index, "neutral"),
                 )
             )
@@ -107,44 +114,28 @@ def build_timeline(
 
 def _build_send_titles(step: SendMessageStep) -> tuple[str, str, str]:
     if step.message is None or step.message.msg_id is None:
-        return "SEND", "", "No message"
+        return tr("timeline.send"), "", tr("label.no_message")
 
-    title = f"{_category_label(step.message.category)} {_short_msg_number(step.message.category, step.message.msg_id)}"
+    title = message_code(step.message.category, step.message.msg_id)
     subtitle = ""
-    tooltip = f"{step.message.category} 0x{step.message.msg_id:04X} {step.message.name}"
+    tooltip = message_label(step.message.category, step.message.msg_id, step.message.name)
+    if step.repeats:
+        tooltip += " | " + tr(
+            "timeline.repeats_every", seconds=step.cyclic.period_ms // 1000
+        )
 
     return title, subtitle, tooltip
 
 
 def _build_wait_ts_titles(step: WaitForTsStep) -> tuple[str, str, str]:
     if step.expected is None or step.expected.msg_id is None:
-        return "ТС ?", "", "No TS selected"
+        return f"{category_short('TS')} ?", "", tr("label.no_message")
 
-    title = f"ТС {_short_msg_number(step.expected.category, step.expected.msg_id)}"
+    title = message_code(step.expected.category, step.expected.msg_id)
     subtitle = ""
-    tooltip = f"{step.expected.category} 0x{step.expected.msg_id:04X} {step.expected.name}"
+    tooltip = message_label(step.expected.category, step.expected.msg_id, step.expected.name)
 
     if step.expected.msg_id == 0x0201 and step.bind_to_previous_ku:
-        tooltip += " | ACK for previous KU"
+        tooltip += " | " + tr("timeline.ack_for_previous", category=category_short("KU"))
 
     return title, subtitle, tooltip
-
-
-def _category_label(category: str) -> str:
-    if category == "KU":
-        return "КУ"
-    if category == "KT":
-        return "КТ"
-    if category == "TS":
-        return "ТС"
-    return category
-
-
-def _short_msg_number(category: str, msg_id: int) -> int:
-    if category == "KU":
-        return msg_id
-    if category == "KT":
-        return msg_id - 0x0100 + 1
-    if category == "TS":
-        return msg_id - 0x0200 + 1
-    return msg_id

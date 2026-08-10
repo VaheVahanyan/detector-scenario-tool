@@ -1,165 +1,220 @@
+"""Human-readable rendering of captured messages.
+
+The per-message summaries are generated from the definitions, so a new message is decodable the
+moment it is defined. Only the three messages whose meaning is not a flat field list — ТС «Статус»,
+ТС «Квитанция» and ТС «Телеметрия» — get extra interpretation on top.
+"""
+
 from __future__ import annotations
 
 from detector_scenario_tool.domain.logs import LogRecord
+from detector_scenario_tool.i18n import tr
+from detector_scenario_tool.protocol import registry
+from detector_scenario_tool.protocol.errors import (
+    ALARM_BITS,
+    STATUS_BITS,
+    AckErrorCode,
+    decode_ack_status,
+    decode_bit_names,
+)
+from detector_scenario_tool.protocol.fields import MessageDef, unpack_message
+from detector_scenario_tool.protocol.format_values import format_field_value
+from detector_scenario_tool.protocol.modes import decode_mode_byte
+
+#: How many fields a one-line summary shows before it gives up and reports a count.
+SUMMARY_FIELD_LIMIT = 4
 
 
 def build_log_summary(record: LogRecord) -> str:
+    """One line for the log table."""
+    spec = registry.find(record.category, record.msg_id)
+    if spec is None:
+        return tr("logdecode.unknown_message", length=len(record.payload))
+
     try:
-        if record.category == "KU":
-            return _decode_ku_summary(record)
-        if record.category == "KT":
-            return _decode_kt_summary(record)
-        if record.category == "TS":
-            return _decode_ts_summary(record)
+        if spec.msg_id == 0x0201 and spec.category == "TS":
+            return _summarise_ack(spec, record.payload)
+        if spec.msg_id == 0x0200 and spec.category == "TS":
+            return _summarise_status(spec, record.payload)
+        if spec.msg_id == 0x0202 and spec.category == "TS":
+            return _summarise_telemetry(spec, record.payload)
+        return _summarise_generic(spec, record.payload)
     except Exception:
-        pass
-
-    if record.payload:
-        return f"{len(record.payload)} bytes"
-    return "No payload"
+        return tr("logdecode.undecodable", length=len(record.payload))
 
 
-def _decode_ku_summary(record: LogRecord) -> str:
-    payload = record.payload
-    msg_id = record.msg_id
+def build_log_detail(record: LogRecord) -> str:
+    """Multi-line field-by-field decode for the detail pane."""
+    spec = registry.find(record.category, record.msg_id)
+    if spec is None:
+        return tr("logdecode.unknown_message", length=len(record.payload))
 
-    if msg_id == 0x0000:
-        return "Telemetry request"
+    values = unpack_message(spec, record.payload)
+    lines = [f"{spec.symbol} — {tr(spec.name_key)}"]
+    if spec.doc_ref:
+        lines.append(spec.doc_ref)
+    lines.append("")
 
-    if msg_id == 0x0001:
-        return "Status request"
-
-    if msg_id == 0x0002 and len(payload) >= 6:
-        time_ms = int.from_bytes(payload[0:2], "little", signed=False)
-        time_s = int.from_bytes(payload[2:6], "little", signed=False)
-        return f"time={time_s}s + {time_ms}ms"
-
-    if msg_id == 0x0003 and len(payload) >= 1:
-        b = payload[0]
-        return (
-            f"bank={_bank_name(b)}, "
-            f"nand_power={_bit_bool(b, 2)}, "
-            f"ped_power={_bit_bool(b, 3)}, "
-            f"low_power={_bit_bool(b, 4)}"
+    for field_spec in spec.fields:
+        if not field_spec.editable or field_spec.key not in values:
+            continue
+        lines.append(
+            f"{field_spec.label}: {format_field_value(field_spec, values[field_spec.key])}"
         )
 
-    if msg_id == 0x0004 and len(payload) >= 6:
-        return f"control payload: {record.payload_hex}"
+    lines.extend(_extra_detail(spec, values))
+    return "\n".join(lines)
 
-    if msg_id == 0x0005 and len(payload) >= 1:
-        b = payload[0]
-        return (
-            f"bank={_bank_name(b)}, "
-            f"nand_power={_bit_bool(b, 2)}, "
-            f"ped_power={_bit_bool(b, 3)}, "
-            f"low_power={_bit_bool(b, 4)}"
+
+# --------------------------------------------------------------------------------------
+# Summaries
+# --------------------------------------------------------------------------------------
+
+def _summarise_generic(spec: MessageDef, data: bytes) -> str:
+    values = unpack_message(spec, data)
+    parts = []
+
+    for field_spec in spec.fields:
+        if not field_spec.editable or field_spec.key not in values:
+            continue
+        parts.append(
+            f"{field_spec.label}="
+            f"{format_field_value(field_spec, values[field_spec.key])}"
+        )
+        if len(parts) >= SUMMARY_FIELD_LIMIT:
+            break
+
+    if not parts:
+        return tr("logdecode.no_fields", length=len(data))
+
+    remaining = len([f for f in spec.editable_fields if f.key in values]) - len(parts)
+    text = ", ".join(parts)
+    if remaining > 0:
+        text += tr("logdecode.more_fields", count=remaining)
+    return text
+
+
+def _summarise_ack(spec: MessageDef, data: bytes) -> str:
+    values = unpack_message(spec, data)
+    acknowledged = values.get("acknowledged_msg_id")
+    rejected = bool(values.get("rejected", 0))
+    code = values.get("error_code", 0)
+
+    try:
+        code_name = tr(AckErrorCode(code).label_key)
+    except ValueError:
+        code_name = str(code)
+
+    text = tr(
+        "logdecode.ack",
+        msg=f"0x{acknowledged:04X}" if acknowledged is not None else "?",
+        verdict=tr("logdecode.ack.rejected") if rejected else tr("logdecode.ack.accepted"),
+        code=code_name,
+    )
+
+    packets = values.get("packet_count")
+    if packets is not None and packets != 0xAAAAAA:
+        # Bytes 5-7 only carry a packet count for the CMD_DUMP acknowledgement (§4.2 note 1).
+        text += tr("logdecode.ack.packets", count=packets)
+    return text
+
+
+def _summarise_status(spec: MessageDef, data: bytes) -> str:
+    values = unpack_message(spec, data)
+    previous, current = decode_mode_byte(
+        (values.get("previous_mode", 0)) | (values.get("current_mode", 0) << 3)
+    )
+    alarms = decode_bit_names(values.get("masked_alarm_status", 0), ALARM_BITS)
+
+    text = tr(
+        "logdecode.status",
+        current=tr(current.label_key) if current else "?",
+        previous=tr(previous.label_key) if previous else "?",
+    )
+
+    overflow = []
+    if values.get("nand1_overflow"):
+        overflow.append("NAND1")
+    if values.get("nand2_overflow"):
+        overflow.append("NAND2")
+    if overflow:
+        text += tr("logdecode.status.overflow", banks=", ".join(overflow))
+
+    if alarms:
+        text += tr("logdecode.status.alarms", alarms=", ".join(alarms))
+    return text
+
+
+def _summarise_telemetry(spec: MessageDef, data: bytes) -> str:
+    values = unpack_message(spec, data)
+    _, current = decode_mode_byte(
+        (values.get("previous_mode", 0)) | (values.get("current_mode", 0) << 3)
+    )
+    alarms = decode_bit_names(values.get("masked_alarm_status", 0), ALARM_BITS)
+
+    text = tr(
+        "logdecode.telemetry",
+        mode=tr(current.label_key) if current else "?",
+        rtc=values.get("rtc", 0),
+        mc_temp=values.get("mc_temp", 0),
+        ped_temp=values.get("ped_temp", 0),
+    )
+    if alarms:
+        text += tr("logdecode.status.alarms", alarms=", ".join(alarms))
+    return text
+
+
+# --------------------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------------------
+
+def _extra_detail(spec: MessageDef, values: dict) -> list[str]:
+    lines: list[str] = []
+
+    if spec.category != "TS":
+        return lines
+
+    if "masked_alarm_status" in values:
+        names = decode_bit_names(values["masked_alarm_status"], ALARM_BITS)
+        lines.append("")
+        lines.append(
+            tr("logdecode.detail.masked_alarms", alarms=", ".join(names) or tr("value.none"))
         )
 
-    if msg_id == 0x0006 and len(payload) >= 6:
-        return f"data output payload: {record.payload_hex}"
+    if "alarm_status" in values:
+        names = decode_bit_names(values["alarm_status"], ALARM_BITS)
+        lines.append(
+            tr("logdecode.detail.alarms", alarms=", ".join(names) or tr("value.none"))
+        )
 
-    if msg_id == 0x0007 and len(payload) >= 6:
-        return f"settings payload: {record.payload_hex}"
+    if "na_status" in values:
+        names = decode_bit_names(values["na_status"], STATUS_BITS)
+        lines.append(
+            tr("logdecode.detail.signals", signals=", ".join(names) or tr("value.none"))
+        )
 
-    if msg_id == 0x0008 and len(payload) >= 1:
-        b = payload[0]
-        return f"erase { _bank_name(b) }, keep_power={_bit_bool(b, 2)}"
+    if "current_mode" in values:
+        previous, current = decode_mode_byte(
+            values.get("previous_mode", 0) | (values.get("current_mode", 0) << 3)
+        )
+        lines.append(
+            tr(
+                "logdecode.detail.mode",
+                current=tr(current.label_key) if current else "?",
+                previous=tr(previous.label_key) if previous else "?",
+            )
+        )
 
-    if msg_id == 0x0009 and len(payload) >= 1:
-        b = payload[0]
-        return f"test { _bank_name(b) }, keep_power={_bit_bool(b, 2)}"
+    if "rejected" in values:
+        rejected, code = decode_ack_status(
+            values.get("rejected", 0) | (values.get("error_code", 0) << 1)
+        )
+        lines.append(
+            tr(
+                "logdecode.detail.ack",
+                verdict=tr("logdecode.ack.rejected") if rejected else tr("logdecode.ack.accepted"),
+                code=tr(code.label_key) if code else "?",
+            )
+        )
 
-    if msg_id == 0x000A and len(payload) >= 1:
-        b = payload[0]
-        return f"request results for { _bank_name(b) }"
-
-    if msg_id == 0x000B:
-        return "Power off"
-
-    if msg_id == 0x000C:
-        return "Reset emergency status"
-
-    return _fallback_payload_summary(record)
-
-
-def _decode_kt_summary(record: LogRecord) -> str:
-    payload = record.payload
-    msg_id = record.msg_id
-
-    if msg_id == 0x0100 and len(payload) >= 6:
-        time_ms = int.from_bytes(payload[0:2], "little", signed=False)
-        time_s = int.from_bytes(payload[2:6], "little", signed=False)
-        return f"sync time={time_s}s + {time_ms}ms"
-
-    if msg_id == 0x0101 and len(payload) >= 20:
-        time_ms = int.from_bytes(payload[0:2], "little", signed=False)
-        time_s = int.from_bytes(payload[2:6], "little", signed=False)
-        x = int.from_bytes(payload[6:10], "little", signed=True)
-        y = int.from_bytes(payload[10:14], "little", signed=True)
-        z = int.from_bytes(payload[14:18], "little", signed=True)
-        return f"t={time_s}.{time_ms}, r=({x}, {y}, {z})"
-
-    if msg_id == 0x0102 and len(payload) >= 22:
-        time_ms = int.from_bytes(payload[0:2], "little", signed=False)
-        time_s = int.from_bytes(payload[2:6], "little", signed=False)
-        q0 = int.from_bytes(payload[6:10], "little", signed=True)
-        q1 = int.from_bytes(payload[10:14], "little", signed=True)
-        q2 = int.from_bytes(payload[14:18], "little", signed=True)
-        q3 = int.from_bytes(payload[18:22], "little", signed=True)
-        return f"t={time_s}.{time_ms}, q=({q0}, {q1}, {q2}, {q3})"
-
-    if msg_id == 0x0103 and len(payload) >= 18:
-        time_ms = int.from_bytes(payload[0:2], "little", signed=False)
-        time_s = int.from_bytes(payload[2:6], "little", signed=False)
-        bx = int.from_bytes(payload[6:10], "little", signed=True)
-        by = int.from_bytes(payload[10:14], "little", signed=True)
-        bz = int.from_bytes(payload[14:18], "little", signed=True)
-        return f"t={time_s}.{time_ms}, B=({bx}, {by}, {bz})"
-
-    return _fallback_payload_summary(record)
-
-
-def _decode_ts_summary(record: LogRecord) -> str:
-    payload = record.payload
-    msg_id = record.msg_id
-
-    if msg_id == 0x0200:
-        if payload:
-            return f"status payload: {record.payload_hex}"
-        return "Status"
-
-    if msg_id == 0x0201:
-        if payload:
-            return f"ack payload: {record.payload_hex}"
-        return "Ack"
-
-    if msg_id == 0x0202:
-        if payload:
-            return f"telemetry payload: {len(payload)} bytes"
-        return "Telemetry"
-
-    if msg_id == 0x0203:
-        if payload:
-            return f"data payload: {len(payload)} bytes"
-        return "Data"
-
-    return _fallback_payload_summary(record)
-
-
-def _fallback_payload_summary(record: LogRecord) -> str:
-    if record.payload:
-        return f"{len(record.payload)} bytes"
-    return "No payload"
-
-
-def _bit_bool(byte_value: int, bit_index: int) -> bool:
-    return bool((byte_value >> bit_index) & 0x1)
-
-
-def _bank_name(byte_value: int) -> str:
-    bank_bits = byte_value & 0x03
-    if bank_bits == 0:
-        return "nand1"
-    if bank_bits == 1:
-        return "nand2"
-    return f"bank_bits={bank_bits}"
+    return lines

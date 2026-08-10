@@ -3,8 +3,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from detector_scenario_tool.domain.custom_messages import (
+    CustomBitRange,
+    CustomByteLayout,
+    CustomMessageSpec,
+)
+from detector_scenario_tool.storage.migration import CURRENT_SCHEMA_VERSION, migrate_document
+
+#: Stamped into every saved file so a future revision can migrate without guessing.
+PROTOCOL_VERSION = "CAN_v2"
 from detector_scenario_tool.domain.scenario import (
     AckPolicy,
+    CyclicPolicy,
     CommentStep,
     MessageRef,
     RetryPolicy,
@@ -57,9 +67,94 @@ def _retry_policy_from_dict(data: dict | None) -> RetryPolicy:
     )
 
 
+def _cyclic_to_dict(cyclic) -> dict | None:
+    if cyclic is None:
+        return None
+    return {
+        "enabled": cyclic.enabled,
+        "period_ms": cyclic.period_ms,
+        "max_repeats": cyclic.max_repeats,
+    }
+
+
+def _cyclic_from_dict(data: dict | None):
+    if data is None:
+        return None
+    return CyclicPolicy(
+        enabled=data.get("enabled", False),
+        period_ms=data.get("period_ms", 20_000),
+        max_repeats=data.get("max_repeats"),
+    )
+
+
+def _custom_message_to_dict(spec) -> dict:
+    return {
+        "id": spec.id,
+        "name": spec.name,
+        "category": spec.category,
+        "msg_id": spec.msg_id,
+        "length": spec.length,
+        "content_hex": spec.content_hex,
+        "force_long": spec.force_long,
+        "destination_id": spec.destination_id,
+        "source_id": spec.source_id,
+        "cyclic": _cyclic_to_dict(spec.cyclic),
+        "overrides_builtin": spec.overrides_builtin,
+        "layout": [
+            {
+                "name": entry.name,
+                "bits": [
+                    {"name": b.name, "offset": b.offset, "length": b.length} for b in entry.bits
+                ],
+            }
+            for entry in spec.layout
+        ],
+    }
+
+
+def _custom_message_from_dict(data: dict) -> CustomMessageSpec:
+    kwargs = {
+        "name": data.get("name", ""),
+        "category": data.get("category", "KU"),
+        "msg_id": data.get("msg_id", 0),
+        "length": data.get("length", 6),
+        "content_hex": data.get("content_hex", ""),
+        "force_long": data.get("force_long"),
+        "destination_id": data.get("destination_id"),
+        "source_id": data.get("source_id"),
+        "cyclic": _cyclic_from_dict(data.get("cyclic")),
+        "overrides_builtin": bool(data.get("overrides_builtin", False)),
+        "layout": [
+            CustomByteLayout(
+                name=entry.get("name", ""),
+                bits=[
+                    CustomBitRange(
+                        name=b.get("name", ""),
+                        offset=b.get("offset", 0),
+                        length=b.get("length", 1),
+                    )
+                    for b in entry.get("bits", [])
+                ],
+            )
+            for entry in data.get("layout", [])
+        ],
+    }
+    if data.get("id"):
+        kwargs["id"] = data["id"]
+    return CustomMessageSpec(**kwargs)
+
+
 def save_scenario(document: ScenarioDocument, path: str | Path) -> None:
     data = {
-        "schema_version": document.schema_version,
+        "schema_version": CURRENT_SCHEMA_VERSION,
+        "protocol_version": PROTOCOL_VERSION,
+        "custom_messages": [
+            _custom_message_to_dict(spec) for spec in getattr(document, "custom_messages", [])
+        ],
+        "suppressed_messages": [
+            {"category": category, "msg_id": msg_id}
+            for category, msg_id in getattr(document, "suppressed_messages", [])
+        ],
         "metadata": {
             "name": document.metadata.name,
             "author": document.metadata.author,
@@ -87,6 +182,7 @@ def save_scenario(document: ScenarioDocument, path: str | Path) -> None:
                     "payload": dict(step.payload),
                     "ack_policy": step.ack_policy.value,
                     "ack_timeout_ms": step.ack_timeout_ms,
+                    "cyclic": _cyclic_to_dict(step.cyclic),
                     "retry": _retry_policy_to_dict(step.retry),
                 }
             )
@@ -134,6 +230,7 @@ def save_scenario(document: ScenarioDocument, path: str | Path) -> None:
 
 def load_scenario(path: str | Path) -> ScenarioDocument:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    raw, migration_notes = migrate_document(raw)
 
     metadata_raw = raw.get("metadata", {})
     metadata = ScenarioMetadata(
@@ -175,6 +272,7 @@ def load_scenario(path: str | Path) -> ScenarioDocument:
                 payload=dict(item.get("payload", {})),
                 ack_policy=AckPolicy(item.get("ack_policy", AckPolicy.NONE.value)),
                 ack_timeout_ms=item.get("ack_timeout_ms"),
+                cyclic=_cyclic_from_dict(item.get("cyclic")),
                 retry=_retry_policy_from_dict(retry_raw),
             )
 
@@ -219,8 +317,16 @@ def load_scenario(path: str | Path) -> ScenarioDocument:
         steps.append(step)
 
     return ScenarioDocument(
-        schema_version=raw.get("schema_version", 1),
+        schema_version=raw.get("schema_version", CURRENT_SCHEMA_VERSION),
         metadata=metadata,
         validation=validation,
         steps=steps,
+        custom_messages=[
+            _custom_message_from_dict(item) for item in raw.get("custom_messages", [])
+        ],
+        suppressed_messages=[
+            (item.get("category", "KU"), item.get("msg_id", 0))
+            for item in raw.get("suppressed_messages", [])
+        ],
+        migration_notes=migration_notes,
     )

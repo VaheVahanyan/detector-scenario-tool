@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
+#: A period shorter than this is not a cadence, it is a flood.
+MIN_CYCLIC_PERIOD_MS = 100
+
 
 class StepKind(str, Enum):
     SEND_KU = "send_ku"
@@ -34,6 +37,27 @@ class RetryPolicy:
 
 
 @dataclass
+class CyclicPolicy:
+    """Repeat a send for as long as the run lasts.
+
+    Telemetry commands are pushed by the БВС for the whole observation session, so they default to
+    repeating; `enabled = False` turns a step back into a single shot, which is what bench testing
+    of one command needs.
+    """
+
+    enabled: bool = False
+    period_ms: int = 20_000
+    #: None means "until the run ends".
+    max_repeats: int | None = None
+
+    def __post_init__(self) -> None:
+        self.enabled = bool(self.enabled)
+        self.period_ms = max(MIN_CYCLIC_PERIOD_MS, int(self.period_ms))
+        if self.max_repeats is not None:
+            self.max_repeats = max(1, int(self.max_repeats))
+
+
+@dataclass
 class StepBase:
     id: str
     kind: StepKind
@@ -56,6 +80,8 @@ class SendMessageStep(StepBase):
     ack_policy: AckPolicy = AckPolicy.NONE
     ack_timeout_ms: int | None = None
     retry: RetryPolicy = field(default_factory=RetryPolicy)
+    #: None for messages that are never repeated; the protocol layer supplies the default.
+    cyclic: CyclicPolicy | None = None
 
     def __post_init__(self) -> None:
         if self.ack_timeout_ms is not None:
@@ -63,6 +89,13 @@ class SendMessageStep(StepBase):
 
         if not isinstance(self.retry, RetryPolicy):
             self.retry = RetryPolicy()
+
+        if self.cyclic is not None and not isinstance(self.cyclic, CyclicPolicy):
+            self.cyclic = CyclicPolicy()
+
+    @property
+    def repeats(self) -> bool:
+        return self.cyclic is not None and self.cyclic.enabled
 
 
 @dataclass
@@ -126,3 +159,12 @@ class ScenarioDocument:
     metadata: ScenarioMetadata
     validation: ValidationProfile
     steps: list[ScenarioStep]
+    #: Messages the user defined for this scenario; registered into the protocol registry on load
+    #: so the rest of the tool treats them exactly like catalogue messages.
+    custom_messages: list = field(default_factory=list)
+    #: Built-in messages this scenario hides, as (category, msg_id). Restoring one is simply
+    #: removing it from here — the specification's own definition is never overwritten.
+    suppressed_messages: list = field(default_factory=list)
+    #: Populated when an older file was upgraded on load; surfaced in the warnings panel so the
+    #: user finds out that something needs re-entering rather than discovering it in flight.
+    migration_notes: list = field(default_factory=list)

@@ -11,6 +11,12 @@ from detector_scenario_tool.domain.scenario import (
     WaitTimeStep,
 )
 from detector_scenario_tool.i18n import tr
+from detector_scenario_tool.protocol import registry
+from detector_scenario_tool.protocol.format_values import format_field_value
+from detector_scenario_tool.utils.labels import category_short, message_label_from_ref
+
+#: How many payload fields the target column shows before it reports a count.
+SUMMARY_FIELD_LIMIT = 3
 
 
 class ScenarioTableModel(QAbstractTableModel):
@@ -35,11 +41,27 @@ class ScenarioTableModel(QAbstractTableModel):
         self.endResetModel()
 
     def set_row_statuses(self, row_statuses: dict[int, str]) -> None:
-        self.beginResetModel()
-        self._row_statuses = dict(row_statuses)
-        self.endResetModel()
+        # Statuses only affect colours, so signal a repaint instead of resetting the model.
+        # A reset clears the view's selection, which used to knock the inspector back to its
+        # empty page on every keystroke.
+        row_statuses = dict(row_statuses)
+        if row_statuses == self._row_statuses:
+            return
+
+        self._row_statuses = row_statuses
+
+        row_count = self.rowCount()
+        if row_count == 0:
+            return
+
+        self.dataChanged.emit(
+            self.index(0, 0),
+            self.index(row_count - 1, self.columnCount() - 1),
+            [Qt.ItemDataRole.BackgroundRole, Qt.ItemDataRole.ForegroundRole],
+        )
 
     def refresh(self) -> None:
+        self.layoutAboutToBeChanged.emit()
         self.layoutChanged.emit()
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
@@ -90,6 +112,9 @@ class ScenarioTableModel(QAbstractTableModel):
             if col == 5:
                 return self._step_comment_text(step)
 
+        if role == Qt.ItemDataRole.ToolTipRole and col == 4:
+            return self._step_timeout_tooltip(step)
+
         status = self._row_statuses.get(row, "neutral")
 
         if role == Qt.ItemDataRole.BackgroundRole:
@@ -112,11 +137,14 @@ class ScenarioTableModel(QAbstractTableModel):
 
     def _step_kind_text(self, step) -> str:
         if isinstance(step, SendMessageStep):
-            category = step.message.category if step.message is not None else "?"
-            return tr("scenario.step.send", category=category)
+            category = step.message.category if step.message is not None else None
+            return tr(
+                "scenario.step.send",
+                category=category_short(category) if category else "?",
+            )
 
         if isinstance(step, WaitForTsStep):
-            return tr("scenario.step.wait_ts")
+            return tr("scenario.step.wait_ts", category=category_short("TS"))
 
         if isinstance(step, WaitTimeStep):
             return tr("scenario.step.wait")
@@ -128,16 +156,10 @@ class ScenarioTableModel(QAbstractTableModel):
 
     def _step_message_target_text(self, step) -> str:
         if isinstance(step, SendMessageStep):
-            if step.message is None or step.message.msg_id is None:
-                return "-"
             return self._message_summary(step)
 
         if isinstance(step, WaitForTsStep):
-            if step.expected is None or step.expected.msg_id is None:
-                return "-"
-            if step.expected.name:
-                return f"TS 0x{step.expected.msg_id:04X} {step.expected.name}"
-            return f"TS 0x{step.expected.msg_id:04X}"
+            return message_label_from_ref(step.expected)
 
         if isinstance(step, WaitTimeStep):
             return tr("scenario.step.ms", value=step.delay_ms)
@@ -148,179 +170,70 @@ class ScenarioTableModel(QAbstractTableModel):
         return "-"
 
     def _step_timeout_text(self, step) -> str:
+        """Only real timeouts belong in this column.
+
+        A WAIT step's `delay_ms` is a planned pause, not a deadline, and it is already shown in
+        the target column — printing it here under a "Timeout" header said the wrong thing.
+        """
         if isinstance(step, SendMessageStep):
             return "" if step.ack_timeout_ms is None else str(step.ack_timeout_ms)
 
         if isinstance(step, WaitForTsStep):
             return str(step.timeout_ms)
 
-        if isinstance(step, WaitTimeStep):
-            return str(step.delay_ms)
-
         return ""
+
+    def _step_timeout_tooltip(self, step) -> str | None:
+        """The column means a different deadline per step kind, so say which one."""
+        if isinstance(step, SendMessageStep):
+            if step.ack_timeout_ms is None:
+                return None
+            return tr("scenario.tooltip.ack_timeout", value=step.ack_timeout_ms)
+
+        if isinstance(step, WaitForTsStep):
+            return tr(
+                "scenario.tooltip.wait_timeout",
+                value=step.timeout_ms,
+                category=category_short("TS"),
+            )
+
+        if isinstance(step, WaitTimeStep):
+            return tr("scenario.tooltip.no_timeout")
+
+        return None
 
     def _step_comment_text(self, step) -> str:
         return getattr(step, "comment", "") or ""
 
     def _message_summary(self, step: SendMessageStep) -> str:
+        """`КУ 0x0008 Стирание ППЗУ [Банк ППЗУ NAND=NAND2, …]`.
+
+        The interesting payload fields are picked from the message definition rather than from a
+        per-message branch, so a new command shows a useful summary with no code here.
+        """
+        label = message_label_from_ref(step.message)
         if step.message is None or step.message.msg_id is None:
-            return "-"
+            return label
 
-        name = step.message.name or ""
-        base = f"{step.message.category} 0x{step.message.msg_id:04X}"
-        if name:
-            base += f" {name}"
+        spec = registry.find(step.message.category, step.message.msg_id)
+        if spec is None:
+            return label
 
-        if step.message.category == "KU" and step.message.msg_id in (0x0000, 0x0001, 0x000B, 0x000C):
-            return f"{base} [fixed=AA AA AA AA AA AA]"
-
-        if step.message.category == "KU" and step.message.msg_id == 0x0002:
-            board_time_ms = step.payload.get("board_time_ms")
-            board_time_s = step.payload.get("board_time_s")
-            if board_time_ms is not None or board_time_s is not None:
-                return (
-                    f"{base} "
-                    f"[ms={board_time_ms if board_time_ms is not None else '-'}, "
-                    f"s={board_time_s if board_time_s is not None else '-'}]"
-                )
-
-        if step.message.category == "KU" and step.message.msg_id == 0x0003:
-            selected_nand_bank = step.payload.get("selected_nand_bank", "-")
-            ped_power_enabled = step.payload.get("ped_power_enabled", False)
-            ped_low_power = step.payload.get("ped_low_power", False)
-            ped_event_registration = step.payload.get("ped_event_registration", False)
-
-            event_format_mode = step.payload.get("event_format_mode", 0)
-            event_count_mode = step.payload.get("event_count_mode", 0)
-            spectrum_mode = step.payload.get("spectrum_mode", 0)
-            histogram_cells = step.payload.get("histogram_cells", 0)
-            particle_threshold = step.payload.get("particle_threshold", 0)
-
-            return (
-                f"{base} "
-                f"[bank={selected_nand_bank}, "
-                f"ped_power={ped_power_enabled}, "
-                f"low_power={ped_low_power}, "
-                f"event_reg={ped_event_registration}, "
-                f"event_fmt={event_format_mode}, "
-                f"event_cnt={event_count_mode}, "
-                f"spectrum={spectrum_mode}, "
-                f"hist={histogram_cells}, "
-                f"thr={particle_threshold}]"
+        parts = []
+        for field_spec in spec.editable_fields:
+            if field_spec.key not in step.payload:
+                continue
+            parts.append(
+                f"{field_spec.label}={format_field_value(field_spec, step.payload[field_spec.key])}"
             )
+            if len(parts) >= SUMMARY_FIELD_LIMIT:
+                break
 
-        if step.message.category == "KU" and step.message.msg_id == 0x0004:
-            ped_power_enabled = step.payload.get("ped_power_enabled", False)
-            ped_low_power = step.payload.get("ped_low_power", False)
-            ped_event_registration = step.payload.get("ped_event_registration", False)
+        if not parts:
+            return label
 
-            event_format_mode = step.payload.get("event_format_mode", 0)
-            event_count_mode = step.payload.get("event_count_mode", 0)
-            spectrum_mode = step.payload.get("spectrum_mode", 0)
-            histogram_cells = step.payload.get("histogram_cells", 0)
-
-            return (
-                f"{base} "
-                f"[ped_power={ped_power_enabled}, "
-                f"low_power={ped_low_power}, "
-                f"event_reg={ped_event_registration}, "
-                f"event_fmt={event_format_mode}, "
-                f"event_cnt={event_count_mode}, "
-                f"spectrum={spectrum_mode}, "
-                f"hist={histogram_cells}]"
-            )
-
-        if step.message.category == "KU" and step.message.msg_id == 0x0005:
-            return (
-                f"{base} "
-                f"[bank={step.payload.get('selected_nand_bank', '-')}, "
-                f"nand_power={step.payload.get('nand_power_enabled', False)}, "
-                f"ped_power={step.payload.get('ped_power_enabled', False)}, "
-                f"low_power={step.payload.get('ped_low_power', False)}]"
-            )
-
-        if step.message.category == "KU" and step.message.msg_id == 0x0006:
-            selected_nand_bank = step.payload.get("selected_nand_bank", "-")
-            keep_power_after_output = step.payload.get("keep_power_after_output", False)
-            output_interface = step.payload.get("output_interface", "usb")
-            output_type = step.payload.get("output_type", "requested_count")
-            requested_packet_count = step.payload.get("requested_packet_count", 0)
-
-            return (
-                f"{base} "
-                f"[bank={selected_nand_bank}, "
-                f"keep_power={keep_power_after_output}, "
-                f"iface={output_interface}, "
-                f"type={output_type}, "
-                f"packets={requested_packet_count}]"
-            )
-
-        if step.message.category == "KU" and step.message.msg_id == 0x0007:
-            return (
-                f"{base} "
-                f"[session_id={step.payload.get('session_id', 0)}, "
-                f"init_rtc={step.payload.get('initial_rtc', 0)}, "
-                f"nand1_packets={step.payload.get('nand1_packet_count', 0)}, "
-                f"nand2_packets={step.payload.get('nand2_packet_count', 0)}, "
-                f"alarm_mask={step.payload.get('alarm_mask', 0)}]"
-            )
-
-        if step.message.category == "KU" and step.message.msg_id == 0x0008:
-            return (
-                f"{base} "
-                f"[bank={step.payload.get('selected_nand_bank', '-')}, "
-                f"keep_power={step.payload.get('keep_power_after_erase', False)}]"
-            )
-
-        if step.message.category == "KU" and step.message.msg_id == 0x0009:
-            return (
-                f"{base} "
-                f"[bank={step.payload.get('selected_nand_bank', '-')}, "
-                f"keep_power={step.payload.get('keep_power_after_test', False)}]"
-            )
-
-        if step.message.category == "KU" and step.message.msg_id == 0x000A:
-            return (
-                f"{base} "
-                f"[bank={step.payload.get('selected_nand_bank', '-')}]"
-            )
-
-        if step.message.category == "KT" and step.message.msg_id == 0x0100:
-            board_time_ms = step.payload.get("board_time_ms")
-            board_time_s = step.payload.get("board_time_s")
-
-            return (
-                f"{base} "
-                f"[ms={board_time_ms if board_time_ms is not None else '-'}, "
-                f"s={board_time_s if board_time_s is not None else '-'}]"
-            )
-
-        if step.message.category == "KT" and step.message.msg_id == 0x0101:
-            return (
-                f"{base} "
-                f"[t={step.payload.get('measurement_time_s', 0)}."
-                f"{step.payload.get('measurement_time_ms', 0)}, "
-                f"xyz=({step.payload.get('x', 0)}, {step.payload.get('y', 0)}, {step.payload.get('z', 0)}), "
-                f"v=({step.payload.get('vx', 0)}, {step.payload.get('vy', 0)}, {step.payload.get('vz', 0)}), "
-                f"L={step.payload.get('l_shell', 0)}, "
-                f"B={step.payload.get('b_field', 0)}]"
-            )
-
-        if step.message.category == "KT" and step.message.msg_id == 0x0102:
-            return (
-                f"{base} "
-                f"[t={step.payload.get('measurement_time_s', 0)}."
-                f"{step.payload.get('measurement_time_ms', 0)}, "
-                f"q=({step.payload.get('q0', 0)}, {step.payload.get('q1', 0)}, "
-                f"{step.payload.get('q2', 0)}, {step.payload.get('q3', 0)})]"
-            )
-
-        if step.message.category == "KT" and step.message.msg_id == 0x0103:
-            return (
-                f"{base} "
-                f"[t={step.payload.get('measurement_time_s', 0)}."
-                f"{step.payload.get('measurement_time_ms', 0)}, "
-                f"B=({step.payload.get('bx', 0)}, {step.payload.get('by', 0)}, {step.payload.get('bz', 0)})]"
-            )
-
-        return base
+        remaining = sum(1 for f in spec.editable_fields if f.key in step.payload) - len(parts)
+        summary = ", ".join(parts)
+        if remaining > 0:
+            summary += tr("logdecode.more_fields", count=remaining)
+        return f"{label} [{summary}]"
