@@ -7,9 +7,9 @@ the master switch that turns telemetry commands off for a whole run.
 from __future__ import annotations
 
 import pytest
+from message_ids import STATUS_REQ, TLM_MAGFIELD, TLM_MCILWAIN
 
-MCILWAIN = 0x0100
-STATUS_REQ = 0x0001
+MCILWAIN = TLM_MCILWAIN
 
 
 @pytest.fixture
@@ -94,7 +94,7 @@ class TestInspector:
         step = _add_tc(window)
         assert step.cyclic is not None
 
-        _pick(window, window.inspector_panel.msg_selector, 0xF221)
+        _pick(window, window.inspector_panel.msg_selector, TLM_MAGFIELD)
         assert step.cyclic is not None, "another telemetry command still repeats"
 
     def test_the_setting_survives_a_save_and_load(self, window, tmp_path):

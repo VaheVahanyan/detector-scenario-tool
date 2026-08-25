@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from detector_scenario_tool.domain.logs import LogRecord
+from message_ids import STATUS_REQ, TM_ACK
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ def _records() -> list[LogRecord]:
             timestamp_ms=i * 10,
             direction="tx" if i % 2 == 0 else "rx",
             category="KU" if i % 2 == 0 else "TS",
-            msg_id=0x0001 if i % 2 == 0 else 0x0201,
+            msg_id=STATUS_REQ if i % 2 == 0 else TM_ACK,
             payload=b"\xaa" * 6,
             source="l476" if i % 2 == 0 else "l496",
         )

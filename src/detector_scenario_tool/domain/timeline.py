@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from detector_scenario_tool.protocol import well_known
 from detector_scenario_tool.i18n import tr
 from detector_scenario_tool.utils.labels import category_short, message_code, message_label
 from detector_scenario_tool.domain.scenario import (
@@ -135,7 +136,8 @@ def _build_wait_ts_titles(step: WaitForTsStep) -> tuple[str, str, str]:
     subtitle = ""
     tooltip = message_label(step.expected.category, step.expected.msg_id, step.expected.name)
 
-    if step.expected.msg_id == 0x0201 and step.bind_to_previous_ku:
+    is_ack = well_known.is_ack(step.expected.category, step.expected.msg_id)
+    if is_ack and step.bind_to_previous_ku:
         tooltip += " | " + tr("timeline.ack_for_previous", category=category_short("KU"))
 
     return title, subtitle, tooltip

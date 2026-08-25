@@ -19,6 +19,7 @@ from detector_scenario_tool.protocol import registry
 from detector_scenario_tool.protocol.fields import pack_message
 from detector_scenario_tool.services.custom_message_sync import CustomMessageSync
 from detector_scenario_tool.transport.unican import Reassembler, UniCanMessage, encode
+from message_ids import STATUS_REQ, TLM_MCILWAIN
 
 
 @pytest.fixture
@@ -53,19 +54,27 @@ class TestSpec:
         assert CustomMessageSpec(length=-5).length == 0
 
     def test_the_name_falls_back_to_the_symbol(self):
-        spec = CustomMessageSpec(msg_id=0x0F01)
-        assert spec.display_name == "CUSTOM_KU_0F01"
+        spec = CustomMessageSpec(msg_id=0x0FFF)
+        assert spec.display_name == "CUSTOM_KU_0FFF"
 
 
 class TestValidation:
     def test_a_plain_definition_is_clean(self):
-        assert validate_spec(CustomMessageSpec(msg_id=0x0F01, length=6, content_hex="AA")) == []
+        assert validate_spec(CustomMessageSpec(msg_id=0x0FFF, length=6, content_hex="AA")) == []
 
-    @pytest.mark.parametrize("msg_id", [0xFF00, 0xFFFE, 0xFFFF])
-    def test_the_reserved_range_is_refused(self, msg_id):
+    @pytest.mark.parametrize("msg_id", [0xFFFE, 0xFFFF])
+    def test_the_framing_identifiers_are_refused(self, msg_id):
         """FFFEh starts a long message and FFFFh is an error frame — these break the framing."""
         codes = [code for code, _ in validate_spec(CustomMessageSpec(msg_id=msg_id))]
-        assert "custom.reserved_msg_id" in codes
+        assert "custom.unusable_msg_id" in codes
+
+    @pytest.mark.parametrize("msg_id", [0xFF00, 0xFFE5, 0xFFFD])
+    def test_the_rest_of_the_reserved_band_only_warns(self, msg_id):
+        """v2.1 allocates FFE0h/FFE1h from the band, so it cannot be a refusal any more — but a
+        hand-written definition there may still collide with something the bus vendor uses.
+        """
+        codes = [code for code, _ in validate_spec(CustomMessageSpec(msg_id=msg_id))]
+        assert codes == ["custom.reserved_msg_id"]
 
     def test_a_long_payload_forced_short_is_refused(self):
         spec = CustomMessageSpec(length=10, force_long=False)
@@ -84,7 +93,7 @@ class TestValidation:
 
 class TestConversion:
     def test_it_becomes_a_message_definition(self):
-        spec = CustomMessageSpec(name="Test", msg_id=0x0F01, length=6, content_hex="01 02 03")
+        spec = CustomMessageSpec(name="Test", msg_id=0x0FFF, length=6, content_hex="01 02 03")
         definition = to_message_def(spec)
 
         assert definition.custom is True
@@ -93,7 +102,7 @@ class TestConversion:
         assert [f.key for f in definition.editable_fields] == ["content"]
 
     def test_it_packs_through_the_ordinary_packer(self):
-        spec = CustomMessageSpec(msg_id=0x0F01, length=6, content_hex="01 02 03")
+        spec = CustomMessageSpec(msg_id=0x0FFF, length=6, content_hex="01 02 03")
         definition = to_message_def(spec)
 
         packed = pack_message(definition, {"content": spec.content_bytes()})
@@ -111,7 +120,7 @@ class TestConversion:
         assert definition.cyclic_default.period_ms == 3000
 
     def test_a_custom_message_frames_over_unican(self):
-        spec = CustomMessageSpec(msg_id=0x0F01, length=10, content_hex="01" * 10)
+        spec = CustomMessageSpec(msg_id=0x0FFF, length=10, content_hex="01" * 10)
         frames = encode(spec.msg_id, spec.content_bytes(), destination=0x1E, source=0x05)
 
         reassembler = Reassembler()
@@ -123,41 +132,41 @@ class TestConversion:
 
 class TestRegistrySync:
     def test_a_definition_becomes_visible_to_the_catalogue(self, sync):
-        sync.apply([CustomMessageSpec(name="X", msg_id=0x0F01, length=6)])
+        sync.apply([CustomMessageSpec(name="X", msg_id=0x0FFF, length=6)])
 
-        found = registry.find("KU", 0x0F01)
+        found = registry.find("KU", 0x0FFF)
         assert found is not None
         assert found.custom_name == "X"
 
     def test_applying_again_withdraws_the_previous_set(self, sync):
-        sync.apply([CustomMessageSpec(msg_id=0x0F01, length=6)])
-        sync.apply([CustomMessageSpec(msg_id=0x0F02, length=6)])
+        sync.apply([CustomMessageSpec(msg_id=0x0FFF, length=6)])
+        sync.apply([CustomMessageSpec(msg_id=0x0FFE, length=6)])
 
-        assert registry.find("KU", 0x0F01) is None
-        assert registry.find("KU", 0x0F02) is not None
+        assert registry.find("KU", 0x0FFF) is None
+        assert registry.find("KU", 0x0FFE) is not None
 
     def test_clear_removes_everything(self, sync):
-        sync.apply([CustomMessageSpec(msg_id=0x0F01, length=6)])
+        sync.apply([CustomMessageSpec(msg_id=0x0FFF, length=6)])
         sync.clear()
 
-        assert registry.find("KU", 0x0F01) is None
+        assert registry.find("KU", 0x0FFF) is None
 
     def test_a_catalogue_message_cannot_be_shadowed(self, sync):
         """Redefining CMD_STATUS_REQ would silently change what every existing scenario means."""
-        rejected = sync.apply([CustomMessageSpec(msg_id=0x0001, length=6)])
+        rejected = sync.apply([CustomMessageSpec(msg_id=STATUS_REQ, length=6)])
 
         assert len(rejected) == 1
-        assert registry.find("KU", 0x0001).symbol == "CMD_STATUS_REQ"
+        assert registry.find("KU", STATUS_REQ).symbol == "CMD_STATUS_REQ"
 
     def test_the_mode_matrix_is_refreshed(self, sync):
         from detector_scenario_tool.validation.mode_analyzer import ALLOWED_KU_BY_MODE
         from detector_scenario_tool.protocol.modes import Mode
 
-        sync.apply([CustomMessageSpec(msg_id=0x0F01, length=6)])
-        assert 0x0F01 in ALLOWED_KU_BY_MODE[Mode.DUTY]
+        sync.apply([CustomMessageSpec(msg_id=0x0FFF, length=6)])
+        assert 0x0FFF in ALLOWED_KU_BY_MODE[Mode.DUTY]
 
         sync.clear()
-        assert 0x0F01 not in ALLOWED_KU_BY_MODE[Mode.DUTY]
+        assert 0x0FFF not in ALLOWED_KU_BY_MODE[Mode.DUTY]
 
 
 class TestPersistence:
@@ -172,7 +181,7 @@ class TestPersistence:
         spec = CustomMessageSpec(
             name="Проба",
             category="KT",
-            msg_id=0x0F02,
+            msg_id=0x0FFE,
             length=4,
             content_hex="DE AD BE EF",
             force_long=True,
@@ -197,7 +206,7 @@ class TestPersistence:
         assert restored.id == spec.id
         assert restored.name == "Проба"
         assert restored.category == "KT"
-        assert restored.msg_id == 0x0F02
+        assert restored.msg_id == 0x0FFE
         assert restored.force_long is True
         assert restored.destination_id == 0x09
         assert restored.cyclic.period_ms == 2000
@@ -206,23 +215,23 @@ class TestPersistence:
 class TestIdentifierValidity:
     def test_a_catalogue_identifier_is_refused(self):
         """Redefining CMD_STATUS_REQ would change what every scenario using it means."""
-        issues = dict(validate_spec(CustomMessageSpec(category="KU", msg_id=0x0001)))
+        issues = dict(validate_spec(CustomMessageSpec(category="KU", msg_id=STATUS_REQ)))
 
         assert "custom.shadows_catalogue" in issues
         assert issues["custom.shadows_catalogue"]["symbol"] == "CMD_STATUS_REQ"
 
     def test_a_free_identifier_is_accepted(self):
-        codes = [code for code, _ in validate_spec(CustomMessageSpec(msg_id=0x0F01))]
+        codes = [code for code, _ in validate_spec(CustomMessageSpec(msg_id=0x0FFF))]
         assert "custom.shadows_catalogue" not in codes
 
     def test_the_same_identifier_in_another_category_is_free(self):
         """КУ and КТ are separate spaces; 0100h is a КТ and says nothing about КУ 0100h."""
-        codes = [code for code, _ in validate_spec(CustomMessageSpec(category="KU", msg_id=0x0100))]
+        codes = [code for code, _ in validate_spec(CustomMessageSpec(category="KU", msg_id=TLM_MCILWAIN))]
         assert "custom.shadows_catalogue" not in codes
 
     def test_a_duplicate_among_user_definitions_is_reported(self):
-        first = CustomMessageSpec(name="Первая", msg_id=0x0F01)
-        second = CustomMessageSpec(name="Вторая", msg_id=0x0F01)
+        first = CustomMessageSpec(name="Первая", msg_id=0x0FFF)
+        second = CustomMessageSpec(name="Вторая", msg_id=0x0FFF)
 
         issues = dict(validate_spec(second, others=[first]))
 
@@ -230,7 +239,7 @@ class TestIdentifierValidity:
         assert issues["custom.duplicate_msg_id"]["name"] == "Первая"
 
     def test_a_definition_does_not_collide_with_itself(self):
-        spec = CustomMessageSpec(msg_id=0x0F01)
+        spec = CustomMessageSpec(msg_id=0x0FFF)
         codes = [code for code, _ in validate_spec(spec, others=[spec])]
 
         assert "custom.duplicate_msg_id" not in codes
@@ -238,7 +247,7 @@ class TestIdentifierValidity:
     def test_overlapping_bit_fields_are_reported(self):
         from detector_scenario_tool.domain.custom_messages import CustomBitRange, CustomByteLayout
 
-        spec = CustomMessageSpec(msg_id=0x0F01, length=1)
+        spec = CustomMessageSpec(msg_id=0x0FFF, length=1)
         spec.trim_layout()
         spec.layout[0] = CustomByteLayout(
             bits=[
@@ -261,7 +270,7 @@ class TestLayoutPersistence:
         )
         from detector_scenario_tool.storage.scenario_io import load_scenario, save_scenario
 
-        spec = CustomMessageSpec(name="X", msg_id=0x0F01, length=2, content_hex="06 FF")
+        spec = CustomMessageSpec(name="X", msg_id=0x0FFF, length=2, content_hex="06 FF")
         spec.trim_layout()
         spec.layout[0] = CustomByteLayout(
             name="Конфигурация",

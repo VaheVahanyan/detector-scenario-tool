@@ -22,6 +22,7 @@ from detector_scenario_tool.ui.editors.payload_editor_registry import (
     build_payload_editor_registry,
 )
 from detector_scenario_tool.validation.mode_analyzer import ALLOWED_KU_BY_MODE
+from message_ids import TM_ACK
 
 CATALOG = ProtocolCatalog()
 ALL_MESSAGES = CATALOG.messages
@@ -83,7 +84,7 @@ def test_every_control_command_declares_expected_responses(message):
     """Every КУ/CC gets at least an acknowledgement (ТС «Квитанция», 0201h)."""
     responses = get_expected_responses(message.category, message.msg_id)
     assert responses, "no expected responses declared"
-    assert any(r.is_ack and r.msg_id == 0x0201 for r in responses)
+    assert any(r.is_ack and r.msg_id == TM_ACK for r in responses)
 
 
 @pytest.mark.parametrize(

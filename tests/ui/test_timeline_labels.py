@@ -15,8 +15,9 @@ from detector_scenario_tool.ui.panels.timeline_panel import (
     _STATUS_ROLE,
     SELECTION_COLOUR,
 )
+from message_ids import SET_TIME
 
-SET_TIME = 0x0002
+SET_TIME = SET_TIME
 
 
 @pytest.fixture
@@ -73,7 +74,7 @@ class TestNarrowItems:
         _add_send(window)
         panel = _panel(window)
 
-        assert "0x0002" in panel._row_to_label_item[0].text()
+        assert f"0x{SET_TIME:04X}" in panel._row_to_label_item[0].text()
 
     def test_a_narrow_item_has_no_visible_block(self, window):
         _add_send(window)
@@ -88,7 +89,7 @@ class TestNarrowItems:
         panel = _panel(window)
 
         tooltip = panel._row_to_label_item[0].toolTip()
-        assert "0x0002" in tooltip
+        assert f"0x{SET_TIME:04X}" in tooltip
         assert len(tooltip) > len(panel._row_to_label_item[0].text())
 
     def test_a_narrow_item_is_still_clickable(self, window):

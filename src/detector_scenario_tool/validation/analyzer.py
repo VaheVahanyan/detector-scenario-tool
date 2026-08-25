@@ -15,13 +15,11 @@ from detector_scenario_tool.domain.scenario import (
     StepKind,
     WaitForTsStep,
 )
-from detector_scenario_tool.protocol import registry
+from detector_scenario_tool.protocol import registry, well_known
 from detector_scenario_tool.protocol.fields import AckBehaviour, validate_payload
 from detector_scenario_tool.validation.diagnostics import Diagnostic, Severity
 from detector_scenario_tool.validation.mode_analyzer import analyze_modes
 
-ACK_MSG_ID = 0x0201
-STATUS_MSG_ID = 0x0200
 
 
 def analyze_scenario(document: ScenarioDocument) -> list[Diagnostic]:
@@ -82,9 +80,22 @@ def _check_send_step(
         )
 
     _check_custom(spec, index, diagnostics)
+    _check_dump_interface(spec, step, index, diagnostics)
     _check_payload(spec, step, index, diagnostics)
     _check_cyclic(document, spec, step, index, diagnostics)
     _check_response_sequence(document, spec, step, index, diagnostics)
+
+
+def _check_dump_interface(spec, step, index: int, diagnostics: list[Diagnostic]) -> None:
+    """§2.7 defines a CAN option that §5.2.6 and §9.7 say the firmware does not implement yet.
+
+    A warning, not an error: sending an out-of-spec value on purpose and checking that the НА
+    answers ERR_CONTENT is a legitimate thing to build a scenario around.
+    """
+    if spec.symbol != "CMD_DUMP" or step.payload.get("output_interface", 0) != 1:
+        return
+
+    diagnostics.append(Diagnostic(Severity.WARNING, index, "dump.can_not_implemented"))
 
 
 def _check_custom(spec, index: int, diagnostics: list[Diagnostic]) -> None:
@@ -329,7 +340,7 @@ def _check_wait_ts_step(step: WaitForTsStep, index: int, diagnostics: list[Diagn
     if step.timeout_ms <= 0:
         diagnostics.append(Diagnostic(Severity.WARNING, index, "wait_ts.timeout_zero"))
 
-    if step.expected.msg_id != ACK_MSG_ID and (
+    if not well_known.is_ack(step.expected.category, step.expected.msg_id) and (
             step.bind_to_previous_ku or step.require_ack_ok or step.ack_for_msg_id is not None
     ):
         diagnostics.append(
@@ -354,6 +365,5 @@ def _is_ack_wait(step: ScenarioStep | None) -> bool:
     return (
         isinstance(step, WaitForTsStep)
         and step.expected is not None
-        and step.expected.category == "TS"
-        and step.expected.msg_id == ACK_MSG_ID
+        and well_known.is_ack(step.expected.category, step.expected.msg_id)
     )

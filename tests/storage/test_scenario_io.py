@@ -19,6 +19,7 @@ from detector_scenario_tool.domain.scenario import (
 )
 from detector_scenario_tool.storage.migration import CURRENT_SCHEMA_VERSION
 from detector_scenario_tool.storage.scenario_io import load_scenario, save_scenario
+from message_ids import STATUS_REQ, TLM_MCILWAIN, TM_ACK
 
 
 def _full_document() -> ScenarioDocument:
@@ -34,7 +35,7 @@ def _full_document() -> ScenarioDocument:
                 kind=StepKind.SEND_KU,
                 title="status request",
                 comment="hello",
-                message=MessageRef(category="KU", msg_id=0x0001, name="Запрос статуса"),
+                message=MessageRef(category="KU", msg_id=STATUS_REQ, name="Запрос статуса"),
                 payload={},
                 ack_policy=AckPolicy.EXPECT_ACK,
                 ack_timeout_ms=1500,
@@ -45,10 +46,10 @@ def _full_document() -> ScenarioDocument:
             WaitForTsStep(
                 id="s2",
                 kind=StepKind.WAIT_FOR_TS,
-                expected=MessageRef(category="TS", msg_id=0x0201, name="Квитанция"),
+                expected=MessageRef(category="TS", msg_id=TM_ACK, name="Квитанция"),
                 timeout_ms=1000,
                 bind_to_previous_ku=True,
-                ack_for_msg_id=0x0001,
+                ack_for_msg_id=STATUS_REQ,
                 require_ack_ok=True,
             ),
             WaitTimeStep(id="s3", kind=StepKind.WAIT_TIME, delay_ms=750),
@@ -135,6 +136,7 @@ def test_v1_documents_are_migrated_not_silently_reinterpreted(tmp_path):
                     {
                         "id": "s1",
                         "kind": "send_kt",
+                        # 0100h in v1 meant «Сверка времени», 6 bytes. It is not TLM_MCILWAIN.
                         "message": {"category": "KT", "msg_id": 0x0100, "name": "Сверка времени"},
                         "payload": {"board_time_ms": 1, "board_time_s": 2},
                     }
@@ -151,9 +153,9 @@ def test_v1_documents_are_migrated_not_silently_reinterpreted(tmp_path):
     codes = {note.code for note in loaded.migration_notes}
     assert "migration.telemetry_command_quarantined" in codes
 
-    # The step must not have become a v2 TLM_MCILWAIN send; it is parked as a disabled comment
-    # that still carries the original JSON.
+    # The step must not have become a telemetry-command send; it is parked as a disabled comment
+    # that still carries the original JSON, with the identifier the v1 file actually used.
     step = loaded.steps[0]
     assert step.kind.value == "comment"
     assert step.enabled is False
-    assert "0x0100" in step.text or "256" in step.text
+    assert '"msg_id": 256' in step.text

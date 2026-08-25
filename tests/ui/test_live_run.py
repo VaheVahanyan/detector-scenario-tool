@@ -10,6 +10,7 @@ import pytest
 
 from detector_scenario_tool.services.scenario_runner import RunState
 from detector_scenario_tool.transport.backend import ConnectionSettings
+from message_ids import OBSERVE_CTRL, STATUS_REQ, TM_ACK
 
 
 @pytest.fixture
@@ -50,7 +51,7 @@ def _run_to_completion(window, max_ticks: int = 300):
 
 class TestDryRun:
     def test_a_scenario_runs_to_completion(self, window):
-        _add_send(window, 0x0001)
+        _add_send(window, STATUS_REQ)
         window._add_wait_ts_step()
         _connect(window)
 
@@ -61,7 +62,7 @@ class TestDryRun:
         assert runner.summary.failures == 0
 
     def test_traffic_lands_in_the_log(self, window):
-        _add_send(window, 0x0001)
+        _add_send(window, STATUS_REQ)
         _connect(window)
 
         window._start_run()
@@ -69,11 +70,11 @@ class TestDryRun:
 
         sources = {record.source for record in window.log_records}
         assert sources == {"host", "detector"}
-        assert any(r.direction == "tx" and r.msg_id == 0x0001 for r in window.log_records)
-        assert any(r.direction == "rx" and r.msg_id == 0x0201 for r in window.log_records)
+        assert any(r.direction == "tx" and r.msg_id == STATUS_REQ for r in window.log_records)
+        assert any(r.direction == "rx" and r.msg_id == TM_ACK for r in window.log_records)
 
     def test_step_statuses_reach_the_table_and_the_timeline(self, window):
-        _add_send(window, 0x0001)
+        _add_send(window, STATUS_REQ)
         _connect(window)
 
         window._start_run()
@@ -85,7 +86,7 @@ class TestDryRun:
 
     def test_a_command_invalid_in_the_current_mode_is_reported(self, window):
         """CMD_OBSERVE_CTRL outside OBSERVE gets ERR_MODE back from the simulated detector."""
-        _add_send(window, 0x0004)
+        _add_send(window, OBSERVE_CTRL)
         _connect(window)
 
         window._start_run()
@@ -96,7 +97,7 @@ class TestDryRun:
         assert "ERR_MODE" in runner.summary.detail
 
     def test_the_summary_is_shown(self, window):
-        _add_send(window, 0x0001)
+        _add_send(window, STATUS_REQ)
         _connect(window)
 
         window._start_run()
@@ -135,7 +136,7 @@ class TestSafety:
     def test_declining_the_confirmation_starts_nothing(self, window, monkeypatch):
         from PySide6.QtWidgets import QMessageBox
 
-        _add_send(window, 0x0001)
+        _add_send(window, STATUS_REQ)
         _connect(window)
         monkeypatch.setattr(
             window.run_controller.backend.__class__, "is_simulated", property(lambda self: False)
@@ -175,8 +176,8 @@ class TestControls:
         assert window.run_panel.run_button.isEnabled()
 
     def test_single_stepping_pauses_between_steps(self, window):
-        _add_send(window, 0x0001)
-        _add_send(window, 0x0001)
+        _add_send(window, STATUS_REQ)
+        _add_send(window, STATUS_REQ)
         _connect(window)
 
         window._step_run()
@@ -190,7 +191,7 @@ class TestControls:
         assert runner.summary.steps_done == 1
 
     def test_stopping_ends_the_run(self, window):
-        _add_send(window, 0x0001)
+        _add_send(window, STATUS_REQ)
         _connect(window)
 
         window._start_run()

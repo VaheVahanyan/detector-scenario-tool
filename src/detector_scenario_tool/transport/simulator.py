@@ -12,14 +12,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from detector_scenario_tool.protocol import registry
+from detector_scenario_tool.protocol import registry, well_known
 from detector_scenario_tool.protocol.errors import AckErrorCode, encode_ack_status
 from detector_scenario_tool.protocol.fields import AckBehaviour, pack_message, validate_payload
 from detector_scenario_tool.protocol.fields import unpack_message
 from detector_scenario_tool.protocol.modes import TELEMETRY_MODE_CODES, Mode
 
-ACK_MSG_ID = 0x0201
-STATUS_MSG_ID = 0x0200
 
 
 @dataclass(frozen=True)
@@ -94,7 +92,7 @@ class DetectorSimulator:
             payload: bytes = b"",
             spec=None,
     ) -> SimulatedReply:
-        ack_spec = registry.find("TS", ACK_MSG_ID)
+        ack_spec = well_known.definition(well_known.ACK)
         values = {
             "acknowledged_msg_id": msg_id,
             "rejected": 1 if code is not AckErrorCode.OK else 0,
@@ -107,7 +105,7 @@ class DetectorSimulator:
             requested = unpack_message(spec, payload).get("requested_packet_count", 0)
             values["packet_count"] = requested
 
-        return SimulatedReply(ACK_MSG_ID, pack_message(ack_spec, values))
+        return SimulatedReply(ack_spec.msg_id, pack_message(ack_spec, values))
 
     def _follow_ups(self, spec) -> list[SimulatedReply]:
         replies = []
@@ -123,7 +121,7 @@ class DetectorSimulator:
         spec = registry.find("TS", msg_id)
         values = dict(spec.default_payload())
 
-        if msg_id == STATUS_MSG_ID or msg_id == 0x0202:
+        if well_known.is_status("TS", msg_id) or well_known.is_telemetry("TS", msg_id):
             values["previous_mode"] = TELEMETRY_MODE_CODES[self.previous_mode]
             values["current_mode"] = TELEMETRY_MODE_CODES[self.mode]
 
@@ -133,7 +131,16 @@ class DetectorSimulator:
     def _payload_is_invalid(spec, payload: bytes) -> bool:
         if len(payload) != spec.length:
             return True
-        return bool(validate_payload(spec, unpack_message(spec, payload)))
+
+        values = unpack_message(spec, payload)
+
+        # §9.7: the dump interface bit is defined by the protocol but the firmware implements USB
+        # only and rejects CAN. Answering the way the НА does is what makes a dry run worth
+        # anything — the packer transmits the bit precisely so this can be observed.
+        if spec.symbol == "CMD_DUMP" and values.get("output_interface", 0) == 1:
+            return True
+
+        return bool(validate_payload(spec, values))
 
 
 def encoded_ack_status(rejected: bool, code: AckErrorCode) -> int:

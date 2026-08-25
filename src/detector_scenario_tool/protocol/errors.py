@@ -6,7 +6,7 @@ from enum import IntEnum
 
 
 class AckErrorCode(IntEnum):
-    """Bits 1-7 of byte 4 of ТС «Квитанция» (Протокол_CAN_ГС_v2 §4.2)."""
+    """Bits 1-7 of byte 4 of ТС «Квитанция» (Протокол_CAN_ГС_v2_1_Спутникс §4.2)."""
 
     OK = 0
     ERR_MSG_ID = 1
@@ -59,7 +59,7 @@ class UniCanBusError(IntEnum):
         return f"unican.error.{self.name.lower()}"
 
 
-#: Alarm bits of the "Аварийный статус НА" word (Протокол_CAN_ГС_v2 §4.1).
+#: Alarm bits of the "Аварийный статус НА" word (Протокол_CAN_ГС_v2_1_Спутникс §4.1).
 ALARM_BITS: tuple[str, ...] = (
     "ALARM_MC_Temp",
     "ALARM_PU_Temp",
@@ -84,7 +84,7 @@ NON_MASKABLE_ALARMS: frozenset[str] = frozenset(
     {"ALARM_NAND_PS", "ALARM_NAND_PR", "ALARM_USB_PR"}
 )
 
-#: Bits of the "Статус НА" word (Протокол_CAN_ГС_v2 §4.1).
+#: Bits of the "Статус НА" word (Протокол_CAN_ГС_v2_1_Спутникс §4.1).
 STATUS_BITS: tuple[str, ...] = (
     "PU_CAN1_SHDN",
     "PU_CAN1_S",

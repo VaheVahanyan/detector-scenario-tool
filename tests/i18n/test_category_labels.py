@@ -17,6 +17,7 @@ from detector_scenario_tool.utils.labels import (
     message_label,
     message_label_from_ref,
 )
+from message_ids import OBSERVE_START
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +59,9 @@ class TestCategoryLabels:
 class TestMessageLabel:
     def test_label_includes_the_hex_id_and_the_catalogue_name(self):
         set_language("ru")
-        assert message_label("KU", 0x0003) == "КУ 0x0003 Включение режима наблюдений"
+        assert message_label("KU", OBSERVE_START) == (
+            f"КУ 0x{OBSERVE_START:04X} Включение режима наблюдений"
+        )
 
     def test_name_comes_from_the_catalogue_not_from_the_caller(self):
         """A `MessageRef` stores the name as it was when the step was created.
@@ -67,8 +70,8 @@ class TestMessageLabel:
         the catalogue wins and the stored name is only a fallback.
         """
         set_language("en")
-        assert message_label("KU", 0x0003, "Включение режима наблюдений") == (
-            "CC 0x0003 Start observation mode"
+        assert message_label("KU", OBSERVE_START, "Включение режима наблюдений") == (
+            f"CC 0x{OBSERVE_START:04X} Start observation mode"
         )
 
     def test_unknown_message_falls_back_to_the_supplied_name(self):

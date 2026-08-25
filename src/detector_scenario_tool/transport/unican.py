@@ -36,6 +36,12 @@ LONG_START_ID = 0xFFFE
 ERROR_ID = 0xFFFF
 RESERVED_MSG_ID_START = 0xFF00
 
+#: The two identifiers that genuinely break the framing rather than merely being spoken for.
+#: `Протокол_CAN_ГС_v2_1_Спутникс` allocates FFE0h/FFE1h out of the reserved band for the software
+#: version query, and the firmware side confirmed the НА accepts them — so the band is a convention
+#: this payload does not follow, and only these two can be refused outright.
+UNUSABLE_MSG_IDS = frozenset({LONG_START_ID, ERROR_ID})
+
 #: Address field widths, from the identifier layouts above.
 STANDARD_ADDRESS_BITS = 5
 EXTENDED_ADDRESS_BITS = 14
@@ -171,10 +177,10 @@ def encode(
     """Split a protocol message into CAN frames. Short or long is decided by the payload size."""
     if not 0 <= msg_id <= 0xFFFF:
         raise UniCanError(f"MSG_ID 0x{msg_id:X} is not a 16-bit value.")
-    if msg_id >= RESERVED_MSG_ID_START:
+    if msg_id in UNUSABLE_MSG_IDS:
         raise UniCanError(
-            f"MSG_ID 0x{msg_id:04X} is in the reserved service range "
-            f"0x{RESERVED_MSG_ID_START:04X}…0xFFFF."
+            f"MSG_ID 0x{msg_id:04X} is the long-message start or the error frame; "
+            f"sending it as a message would corrupt the framing."
         )
 
     if len(payload) <= MAX_SHORT_PAYLOAD:

@@ -17,8 +17,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 
 from detector_scenario_tool.domain.scenario import MessageRef, SendMessageStep, StepKind
+from message_ids import ERASE, SET_TIME
 
-SET_TIME = 0x0002  # CMD_SET_TIME — a message whose editor is made of plain spin boxes
+SET_TIME = SET_TIME  # CMD_SET_TIME — a message whose editor is made of plain spin boxes
 
 
 @pytest.fixture
@@ -240,12 +241,12 @@ def test_changing_the_selected_message_does_swap_the_editor(window, set_time_ste
     editor_before = _payload_editor(window)
 
     selector = window.inspector_panel.msg_selector
-    index = _selector_index_for(selector, 0x0008)
+    index = _selector_index_for(selector, ERASE)
     assert index >= 0
     selector.setCurrentIndex(index)
 
     assert _payload_editor(window) is not editor_before
-    assert window.document.steps[0].message.msg_id == 0x0008
+    assert window.document.steps[0].message.msg_id == ERASE
 
 
 def test_switching_message_does_not_leave_stale_payload_keys(window, set_time_step):
@@ -253,6 +254,6 @@ def test_switching_message_does_not_leave_stale_payload_keys(window, set_time_st
     assert set(set_time_step.payload) == {"board_time_ms", "board_time_s"}
 
     selector = window.inspector_panel.msg_selector
-    selector.setCurrentIndex(_selector_index_for(selector, 0x0008))  # CMD_ERASE
+    selector.setCurrentIndex(_selector_index_for(selector, ERASE))  # CMD_ERASE
 
     assert set(set_time_step.payload) == {"selected_nand_bank", "keep_power_after_erase"}

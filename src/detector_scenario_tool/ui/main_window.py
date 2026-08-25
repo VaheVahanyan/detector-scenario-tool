@@ -40,7 +40,7 @@ from detector_scenario_tool.domain.scenario import (
 )
 from detector_scenario_tool.i18n import get_language, set_language, tr
 from detector_scenario_tool.utils.labels import category_short, message_label_from_ref
-from detector_scenario_tool.protocol import registry
+from detector_scenario_tool.protocol import registry, well_known
 from detector_scenario_tool.protocol.catalog import ProtocolCatalog
 from detector_scenario_tool.protocol.fields import unpack_message
 from detector_scenario_tool.protocol.expected_responses import get_expected_responses
@@ -1263,15 +1263,16 @@ class MainWindow(QMainWindow):
 
     def _note_expected_packets(self, record: LogRecord) -> None:
         """§4.2 note 1: the acknowledgement of CMD_DUMP carries the packet count in bytes 5-7."""
-        if record.direction != "rx" or record.msg_id != 0x0201:
+        if record.direction != "rx" or not well_known.is_ack(record.category, record.msg_id):
             return
 
-        spec = registry.find("TS", 0x0201)
-        if spec is None:
+        spec = well_known.definition(well_known.ACK)
+        dump = registry.by_symbol("CMD_DUMP")
+        if spec is None or dump is None:
             return
 
         values = unpack_message(spec, record.payload)
-        if values.get("acknowledged_msg_id") != 0x0006 or values.get("rejected"):
+        if values.get("acknowledged_msg_id") != dump.msg_id or values.get("rejected"):
             return
 
         count = values.get("packet_count")

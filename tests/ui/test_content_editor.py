@@ -34,7 +34,7 @@ def editor(qtbot):
 
 
 def _load(editor, length: int = 3, content: str = "06 FF 00") -> CustomMessageSpec:
-    spec = CustomMessageSpec(msg_id=0x0F01, length=length, content_hex=content)
+    spec = CustomMessageSpec(msg_id=0x0FFF, length=length, content_hex=content)
     editor.set_spec(spec)
     editor.view_combo.setCurrentIndex(editor.view_combo.findData(VIEW_BYTES))
     return spec

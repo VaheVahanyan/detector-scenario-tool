@@ -10,6 +10,7 @@ from detector_scenario_tool.logs.packet_stream import build_packet
 from detector_scenario_tool.protocol import crc16
 from detector_scenario_tool.transport.backend import ConnectionSettings
 from detector_scenario_tool.ui.models.log_table_model import VIEW_DECODED, VIEW_RAW
+from message_ids import DUMP, STATUS_REQ, TELEM_REQ, TM_ACK
 
 
 @pytest.fixture
@@ -25,16 +26,16 @@ def window(qtbot, tmp_path, monkeypatch):
 def _records() -> list[LogRecord]:
     return [
         LogRecord(
-            timestamp_ms=10, direction="tx", category="KU", msg_id=0x0001,
+            timestamp_ms=10, direction="tx", category="KU", msg_id=STATUS_REQ,
             payload=b"\xaa" * 6, source="host", can_id=0x0BE, frame_count=1,
         ),
         LogRecord(
-            timestamp_ms=20, direction="rx", category="TS", msg_id=0x0201,
+            timestamp_ms=20, direction="rx", category="TS", msg_id=TM_ACK,
             payload=bytes([0x01, 0x00, 0x00, 0xAA, 0xAA, 0xAA]),
             source="detector", can_id=0x3C5,
         ),
         LogRecord(
-            timestamp_ms=30, direction="rx", category="TS", msg_id=0x0000,
+            timestamp_ms=30, direction="rx", category="TS", msg_id=TELEM_REQ,
             payload=b"\x01\x02", source="detector", can_id=0x3C5,
             valid=False, note="CRC error",
         ),
@@ -103,7 +104,7 @@ class TestViewModes:
         window.log_panel.model.set_view_mode(VIEW_DECODED)
         model = window.log_panel.model
 
-        assert "0x0201" in model.data(model.index(1, 3))
+        assert f"0x{TM_ACK:04X}" in model.data(model.index(1, 3))
 
     def test_switching_modes_keeps_the_rows(self, window):
         window.log_panel.set_records(_records())
@@ -237,7 +238,7 @@ class TestPacketsPanel:
     def test_crc_detection_says_so_when_nothing_matches(self, window):
         panel = window.packets_panel
         panel.store_checkbox.setChecked(True)
-        panel.feed(build_packet(1, 0, b"\x01", crc=0x0001))
+        panel.feed(build_packet(1, 0, b"\x01", crc=STATUS_REQ))
         panel._detect_crc_variant()
 
         assert panel.detect_result.text()
@@ -250,7 +251,7 @@ class TestExpectedCount:
         window._select_row(0)
         selector = window.inspector_panel.msg_selector
         for i in range(selector.count()):
-            if selector.itemData(i)[1] == 0x0006:
+            if selector.itemData(i)[1] == DUMP:
                 selector.setCurrentIndex(i)
                 break
         window.document.steps[0].payload["requested_packet_count"] = 5

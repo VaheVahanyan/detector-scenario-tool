@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from detector_scenario_tool.domain.logs import LogRecord
 from detector_scenario_tool.i18n import tr
-from detector_scenario_tool.protocol import registry
+from detector_scenario_tool.protocol import registry, well_known
 from detector_scenario_tool.protocol.errors import (
     ALARM_BITS,
     STATUS_BITS,
@@ -32,11 +32,11 @@ def build_log_summary(record: LogRecord) -> str:
         return tr("logdecode.unknown_message", length=len(record.payload))
 
     try:
-        if spec.msg_id == 0x0201 and spec.category == "TS":
+        if spec.symbol == well_known.ACK:
             return _summarise_ack(spec, record.payload)
-        if spec.msg_id == 0x0200 and spec.category == "TS":
+        if spec.symbol == well_known.STATUS:
             return _summarise_status(spec, record.payload)
-        if spec.msg_id == 0x0202 and spec.category == "TS":
+        if spec.symbol == well_known.TELEMETRY:
             return _summarise_telemetry(spec, record.payload)
         return _summarise_generic(spec, record.payload)
     except Exception:

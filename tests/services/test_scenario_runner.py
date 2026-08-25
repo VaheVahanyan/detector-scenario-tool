@@ -29,6 +29,7 @@ from detector_scenario_tool.services.scenario_runner import (
 )
 from detector_scenario_tool.transport.simulator import DetectorSimulator
 from detector_scenario_tool.transport.virtual import VirtualBackend
+from message_ids import OBSERVE_CTRL, OBSERVE_START, SET_CFG, SET_DEST_ID, SET_TIME_BVS, STATUS_REQ, TLM_MCILWAIN, TM_ACK, TM_STATUS, TM_TELEMETRY
 
 
 class FakeClock:
@@ -103,7 +104,7 @@ def _run(runner: ScenarioRunner, clock: FakeClock, max_ticks: int = 200) -> None
 
 class TestHappyPath:
     def test_status_request_completes(self, backend, clock):
-        document = _document(_send(0x0001, "s1"), _wait_ts(0x0200, "w1"))
+        document = _document(_send(STATUS_REQ, "s1"), _wait_ts(TM_STATUS, "w1"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         _run(runner, clock)
@@ -113,32 +114,33 @@ class TestHappyPath:
         assert runner.summary.failures == 0
 
     def test_bytes_actually_reach_the_bus(self, backend, clock):
-        document = _document(_send(0x0001, "s1"))
+        document = _document(_send(STATUS_REQ, "s1"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         _run(runner, clock)
 
         assert backend.sent_frames
-        assert backend.simulator.received[0][0] == 0x0001
+        assert backend.simulator.received[0][0] == STATUS_REQ
 
     def test_a_long_command_is_segmented_and_reassembled(self, backend, clock):
-        """CMD_SET_CFG is 66 bytes, so it crosses the UniCAN long-message path."""
-        document = _document(_send(0x0007, "s1"))
+        """CMD_SET_CFG is 68 bytes in v2.1, so it crosses the UniCAN long-message path."""
+        document = _document(_send(SET_CFG, "s1"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         _run(runner, clock)
 
         assert runner.summary.outcomes[0] is StepOutcome.OK
+        # 68 content bytes + 2 CRC = 70, so a start frame plus nine data frames.
         assert len(backend.sent_frames) == 10
-        assert len(backend.simulator.received[0][1]) == 66
+        assert len(backend.simulator.received[0][1]) == 68
 
     def test_comments_and_disabled_steps_are_skipped(self, backend, clock):
-        disabled = _send(0x0001, "s1")
+        disabled = _send(STATUS_REQ, "s1")
         disabled.enabled = False
         document = _document(
             CommentStep(id="c", kind=StepKind.COMMENT, text="note"),
             disabled,
-            _send(0x0001, "s2"),
+            _send(STATUS_REQ, "s2"),
         )
         runner = ScenarioRunner(backend, document, clock=clock)
 
@@ -151,8 +153,8 @@ class TestHappyPath:
     def test_mode_transition_is_tracked_by_the_detector(self, backend, clock):
         """CMD_OBSERVE_CTRL is only valid once observation has been started."""
         document = _document(
-            _send(0x0003, "s1"),
-            _send(0x0004, "s2"),
+            _send(OBSERVE_START, "s1"),
+            _send(OBSERVE_CTRL, "s2"),
         )
         runner = ScenarioRunner(backend, document, clock=clock)
 
@@ -182,7 +184,7 @@ class TestWaitTime:
 class TestRejection:
     def test_a_rejected_command_fails_the_step(self, backend, clock):
         """CMD_OBSERVE_CTRL outside OBSERVE gets ERR_MODE."""
-        document = _document(_send(0x0004, "s1"))
+        document = _document(_send(OBSERVE_CTRL, "s1"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         _run(runner, clock)
@@ -192,7 +194,7 @@ class TestRejection:
         assert "ERR_MODE" in runner.summary.detail
 
     def test_run_stops_at_the_first_failure_by_default(self, backend, clock):
-        document = _document(_send(0x0004, "s1"), _send(0x0001, "s2"))
+        document = _document(_send(OBSERVE_CTRL, "s1"), _send(STATUS_REQ, "s2"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         _run(runner, clock)
@@ -200,7 +202,7 @@ class TestRejection:
         assert 1 not in runner.summary.outcomes
 
     def test_it_can_be_told_to_continue(self, backend, clock):
-        document = _document(_send(0x0004, "s1"), _send(0x0001, "s2"))
+        document = _document(_send(OBSERVE_CTRL, "s1"), _send(STATUS_REQ, "s2"))
         runner = ScenarioRunner(backend, document, clock=clock, stop_on_failure=False)
 
         _run(runner, clock)
@@ -210,8 +212,8 @@ class TestRejection:
 
     def test_optional_ack_tolerates_rejection_being_absent(self, backend, clock, simulator):
         """CMD_SET_TIME_SPUTNIKS may be ignored entirely (§9.14)."""
-        simulator.silent_for = {0x0401}
-        document = _document(_send(0x0401, "s1", ack_policy=AckPolicy.OPTIONAL_ACK))
+        simulator.silent_for = {SET_TIME_BVS}
+        document = _document(_send(SET_TIME_BVS, "s1", ack_policy=AckPolicy.OPTIONAL_ACK))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         runner.start()
@@ -224,8 +226,8 @@ class TestRejection:
 
 class TestTimeouts:
     def test_a_silent_detector_times_the_step_out(self, backend, clock, simulator):
-        simulator.silent_for = {0x0001}
-        document = _document(_send(0x0001, "s1"))
+        simulator.silent_for = {STATUS_REQ}
+        document = _document(_send(STATUS_REQ, "s1"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         runner.start()
@@ -237,7 +239,7 @@ class TestTimeouts:
         assert runner.state is RunState.FAILED
 
     def test_a_missing_telemetry_message_times_out(self, backend, clock):
-        document = _document(_wait_ts(0x0202, "w1", timeout_ms=800))
+        document = _document(_wait_ts(TM_TELEMETRY, "w1", timeout_ms=800))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         runner.start()
@@ -248,9 +250,9 @@ class TestTimeouts:
         assert runner.summary.outcomes[0] is StepOutcome.TIMEOUT
 
     def test_retries_are_attempted_before_giving_up(self, backend, clock, simulator):
-        simulator.silent_for = {0x0001}
+        simulator.silent_for = {STATUS_REQ}
         document = _document(
-            _send(0x0001, "s1", retry=RetryPolicy(attempts=3, retry_on_timeout=True))
+            _send(STATUS_REQ, "s1", retry=RetryPolicy(attempts=3, retry_on_timeout=True))
         )
         runner = ScenarioRunner(backend, document, clock=clock)
 
@@ -266,9 +268,9 @@ class TestTimeouts:
     def test_a_retry_succeeds_when_the_detector_starts_answering(
             self, backend, clock, simulator
     ):
-        simulator.silent_for = {0x0001}
+        simulator.silent_for = {STATUS_REQ}
         document = _document(
-            _send(0x0001, "s1", retry=RetryPolicy(attempts=3, retry_on_timeout=True))
+            _send(STATUS_REQ, "s1", retry=RetryPolicy(attempts=3, retry_on_timeout=True))
         )
         runner = ScenarioRunner(backend, document, clock=clock)
 
@@ -284,7 +286,7 @@ class TestTimeouts:
 
 class TestSignals:
     def test_sent_and_received_messages_are_emitted_as_log_records(self, backend, clock):
-        document = _document(_send(0x0001, "s1"))
+        document = _document(_send(STATUS_REQ, "s1"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         sent, received = [], []
@@ -293,13 +295,13 @@ class TestSignals:
 
         _run(runner, clock)
 
-        assert [r.msg_id for r in sent] == [0x0001]
+        assert [r.msg_id for r in sent] == [STATUS_REQ]
         assert [r.direction for r in sent] == ["tx"]
-        assert 0x0201 in [r.msg_id for r in received]
+        assert TM_ACK in [r.msg_id for r in received]
         assert {r.direction for r in received} == {"rx"}
 
     def test_host_and_detector_are_distinguishable_sources(self, backend, clock):
-        document = _document(_send(0x0001, "s1"))
+        document = _document(_send(STATUS_REQ, "s1"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         records = []
@@ -311,7 +313,7 @@ class TestSignals:
         assert {r.source for r in records} == {"host", "detector"}
 
     def test_step_signals_report_progress(self, backend, clock):
-        document = _document(_send(0x0001, "s1"), _wait_ts(0x0200, "w1"))
+        document = _document(_send(STATUS_REQ, "s1"), _wait_ts(TM_STATUS, "w1"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         started, finished = [], []
@@ -324,7 +326,7 @@ class TestSignals:
         assert finished == [(0, "ok"), (1, "ok")]
 
     def test_run_finished_carries_the_summary(self, backend, clock):
-        document = _document(_send(0x0001, "s1"))
+        document = _document(_send(STATUS_REQ, "s1"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         summaries = []
@@ -339,7 +341,7 @@ class TestSignals:
 
 class TestControl:
     def test_pause_and_resume(self, backend, clock):
-        document = _document(_send(0x0001, "s1"), _send(0x0001, "s2"))
+        document = _document(_send(STATUS_REQ, "s1"), _send(STATUS_REQ, "s2"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         runner.start()
@@ -360,7 +362,7 @@ class TestControl:
         assert runner.state is RunState.FINISHED
 
     def test_stop_ends_the_run(self, backend, clock):
-        document = _document(_send(0x0001, "s1"), _send(0x0001, "s2"))
+        document = _document(_send(STATUS_REQ, "s1"), _send(STATUS_REQ, "s2"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         runner.start()
@@ -370,7 +372,7 @@ class TestControl:
         assert runner.state is RunState.STOPPED
 
     def test_single_stepping_pauses_after_each_step(self, backend, clock):
-        document = _document(_send(0x0001, "s1"), _send(0x0001, "s2"))
+        document = _document(_send(STATUS_REQ, "s1"), _send(STATUS_REQ, "s2"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         runner.step_once()
@@ -385,7 +387,7 @@ class TestControl:
 
 class TestAddressChanges:
     def test_set_dest_id_moves_the_target_address(self, backend, clock):
-        step = _send(0x0A61, "s1")
+        step = _send(SET_DEST_ID, "s1")
         step.payload["destination_id"] = 0x11
         document = _document(step)
         runner = ScenarioRunner(backend, document, clock=clock)
@@ -399,7 +401,7 @@ class TestAddressChanges:
 class TestTelemetryCommands:
     def test_a_telemetry_command_needs_no_acknowledgement(self, backend, clock):
         """§2.3: КТ are never acknowledged, so the step must not wait for one."""
-        document = _document(_send(0x0100, "s1", category="KT"))
+        document = _document(_send(TLM_MCILWAIN, "s1", category="KT"))
         runner = ScenarioRunner(backend, document, clock=clock)
 
         _run(runner, clock)

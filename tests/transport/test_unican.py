@@ -150,10 +150,19 @@ class TestLongMessages:
 
 
 class TestReservedIdentifiers:
-    @pytest.mark.parametrize("msg_id", [0xFF00, LONG_START_ID, ERROR_ID])
-    def test_service_identifiers_are_refused(self, msg_id):
-        with pytest.raises(UniCanError, match="reserved"):
+    @pytest.mark.parametrize("msg_id", [LONG_START_ID, ERROR_ID])
+    def test_the_framing_identifiers_are_refused(self, msg_id):
+        """FFFEh starts a long message and FFFFh is an error frame; either would corrupt a stream."""
+        with pytest.raises(UniCanError, match="framing"):
             encode(msg_id, b"", destination=NA, source=BVS)
+
+    @pytest.mark.parametrize("msg_id", [0xFF00, 0xFFE0, 0xFFE1, 0xFFFD])
+    def test_the_rest_of_the_reserved_band_is_allowed(self, msg_id):
+        """`Протокол_CAN_ГС_v2_1_Спутникс` allocates FFE0h/FFE1h from the band SXC РЭ §1.4.4.2
+        reserves, and the firmware side confirmed the НА accepts them. Only the two framing
+        identifiers above are genuinely unusable, so the guard cannot be a range check.
+        """
+        assert encode(msg_id, b"", destination=NA, source=BVS)
 
     def test_the_highest_protocol_id_is_still_allowed(self):
         """TLM_MAGFIELD is F221h, just below the reserved range."""

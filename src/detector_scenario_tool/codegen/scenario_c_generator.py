@@ -359,6 +359,18 @@ def _generate_contract_text(header_filename: str, source_filename: str) -> str:
     return f"""Scenario Runtime Contract
 =========================
 
+Protocol revision
+-----------------
+
+The identifiers in the generated tables follow **Протокол_CAN_ГС_v2_1_Спутникс**. Every control
+command and every telemetry message was renumbered in that revision, so a board runtime built
+against Протокол_CAN_ГС_v2 will answer ERR_MSG_ID to everything this package sends. Check the
+firmware's own message table before flashing a scenario generated here.
+
+The same revision replaced the six-byte AAh-padded form of the short control commands with their
+true content lengths (0-6 bytes), so the DLC of almost every frame changed as well. There is no
+compatibility mode: the generator emits v2.1 lengths only.
+
 This generated scenario package contains:
 - {header_filename}
 - {source_filename}
@@ -390,7 +402,7 @@ Cyclic sends
 ------------
 
 Telemetry commands (КТ) are pushed repeatedly by the БВС for the whole observation session
-(Протокол_CAN_ГС_v2 §3, and the 20 s cadence in the algorithm description). The generated
+(Протокол_CAN_ГС_v2_1_Спутникс §3, and the 20 s cadence in the algorithm description). The generated
 sequence therefore sends such a message once and expects the runtime to register a periodic task:
 
 typedef struct

@@ -1,6 +1,7 @@
 """The DSTLOG line format.
 
-v=2 adds the wire detail the raw log view needs. v=1 files must keep loading — captures from
+v=2 adds the wire detail the raw log view needs, v=3 the category. Older files must keep
+loading — captures from
 before the change are the only record of earlier bench sessions.
 """
 
@@ -16,8 +17,9 @@ from detector_scenario_tool.storage.log_io import (
     parse_log_line,
     parse_log_text,
 )
+from message_ids import OBSERVE_START
 
-V1_LINE = "DSTLOG|v=1|src=board|ts=120|dir=tx|id=0003|data=010203040506"
+V1_LINE = f"DSTLOG|v=1|src=board|ts=120|dir=tx|id={OBSERVE_START:04X}|data=0102030405"
 
 
 def _record(**kw) -> LogRecord:
@@ -25,7 +27,7 @@ def _record(**kw) -> LogRecord:
         timestamp_ms=120,
         direction="tx",
         category="KU",
-        msg_id=0x0003,
+        msg_id=OBSERVE_START,
         payload=bytes(range(6)),
         source="host",
     )
@@ -66,8 +68,8 @@ class TestReading:
     def test_a_v1_line_still_loads(self):
         record = parse_log_line(V1_LINE)
 
-        assert record.msg_id == 0x0003
-        assert record.payload == bytes(range(1, 7))
+        assert record.msg_id == OBSERVE_START
+        assert record.payload == bytes(range(1, 6))
 
     def test_a_v1_line_gets_sensible_defaults(self):
         record = parse_log_line(V1_LINE)
@@ -78,12 +80,12 @@ class TestReading:
 
     def test_an_unknown_version_is_refused(self):
         with pytest.raises(LogLoadError, match="unsupported log version"):
-            parse_log_line("DSTLOG|v=9|src=board|ts=1|dir=tx|id=0003|data=00")
+            parse_log_line(f"DSTLOG|v=9|src=board|ts=1|dir=tx|id={OBSERVE_START:04X}|data=00")
 
     def test_a_bad_can_field_is_refused_rather_than_ignored(self):
         with pytest.raises(LogLoadError, match="can"):
             parse_log_line(
-                "DSTLOG|v=2|src=board|ts=1|dir=tx|id=0003|data=00|can=zz"
+                f"DSTLOG|v=2|src=board|ts=1|dir=tx|id={OBSERVE_START:04X}|data=00|can=zz"
             )
 
     def test_non_dstlog_lines_are_skipped(self):

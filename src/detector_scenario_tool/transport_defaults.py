@@ -6,7 +6,7 @@ starting values, not constants of the protocol.
 
 from __future__ import annotations
 
-#: Протокол_CAN_ГС_v2 §1.5 — address of the spacecraft's onboard computer on CAN1.
+#: Протокол_CAN_ГС_v2_1_Спутникс §1.5 — address of the spacecraft's onboard computer on CAN1.
 DEFAULT_BVS_ADDRESS = 0x05
 
 #: §1.6 — address of the payload (НА) on CAN1, marked "предварительно" in the document.

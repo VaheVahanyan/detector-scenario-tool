@@ -26,7 +26,7 @@ from detector_scenario_tool.domain.scenario import (
     WaitForTsStep,
     WaitTimeStep,
 )
-from detector_scenario_tool.protocol import registry
+from detector_scenario_tool.protocol import registry, well_known
 from detector_scenario_tool.protocol.errors import AckErrorCode, decode_ack_status
 from detector_scenario_tool.protocol.fields import PackingError, pack_message, unpack_message
 from detector_scenario_tool.transport.backend import CanBackend
@@ -38,8 +38,6 @@ from detector_scenario_tool.transport.unican import (
     encode,
 )
 from detector_scenario_tool.transport_defaults import DEFAULT_BVS_ADDRESS, DEFAULT_NA_ADDRESS
-
-ACK_MSG_ID = 0x0201
 
 #: How many unclaimed messages to keep for a later wait step.
 INBOX_LIMIT = 64
@@ -291,7 +289,7 @@ class ScenarioRunner(QObject):
             kind="ack",
             deadline_ms=self._now() + timeout,
             created_ms=self._now(),
-            msg_id=ACK_MSG_ID,
+            msg_id=well_known.msg_id(well_known.ACK),
             sent_msg_id=msg_id,
             require_ack_ok=step.ack_policy is AckPolicy.EXPECT_ACK,
             attempts_left=max(1, step.retry.attempts) - 1,
@@ -436,7 +434,7 @@ class ScenarioRunner(QObject):
         if pending is None or message.msg_id != pending.msg_id:
             return False
 
-        if message.msg_id == ACK_MSG_ID:
+        if well_known.is_ack("TS", message.msg_id):
             acknowledged, rejected, code = self._decode_ack(message.payload)
 
             if pending.sent_msg_id is not None and acknowledged != pending.sent_msg_id:
@@ -455,7 +453,7 @@ class ScenarioRunner(QObject):
 
     @staticmethod
     def _decode_ack(payload: bytes) -> tuple[int | None, bool, AckErrorCode | None]:
-        spec = registry.find("TS", ACK_MSG_ID)
+        spec = well_known.definition(well_known.ACK)
         values = unpack_message(spec, payload)
         acknowledged = values.get("acknowledged_msg_id")
         status_byte = (values.get("rejected", 0) & 1) | ((values.get("error_code", 0) & 0x7F) << 1)
@@ -464,14 +462,15 @@ class ScenarioRunner(QObject):
 
     def _apply_address_change(self, msg_id: int | None) -> None:
         """CMD_SET_DEST_ID / CMD_SET_DEVICE_ID move the bus addresses under us."""
-        if msg_id not in (0x0A61, 0x0A62):
+        which = well_known.is_address_command("KU", msg_id)
+        if which is None:
             return
 
         step = self._current_step()
         if not isinstance(step, SendMessageStep):
             return
 
-        if msg_id == 0x0A61:
+        if which == well_known.SET_DEST_ID:
             new = step.payload.get("destination_id")
             if isinstance(new, int):
                 self.na_address = new

@@ -13,7 +13,7 @@ from detector_scenario_tool.ui.dialogs.custom_message_dialog import (
     CustomMessageDialog,
 )
 
-CUSTOM_ID = 0x0F01
+CUSTOM_ID = 0x0FFF
 
 
 @pytest.fixture
@@ -56,23 +56,23 @@ class TestDialog:
         qtbot.addWidget(dialog)
 
         dialog.name_edit.setText("Мой пакет")
-        dialog.msg_id_edit.setText("0x0F05")
+        dialog.msg_id_edit.setText("0x0FFD")
         dialog.length_spin.setValue(4)
         dialog.content_editor.hex_edit.setPlainText("DE AD BE EF")
 
         spec = dialog.result_spec()
         assert spec.name == "Мой пакет"
-        assert spec.msg_id == 0x0F05
+        assert spec.msg_id == 0x0FFD
         assert spec.content_bytes() == bytes([0xDE, 0xAD, 0xBE, 0xEF])
 
     def test_a_bare_hex_identifier_is_accepted(self, qtbot):
         dialog = CustomMessageDialog()
         qtbot.addWidget(dialog)
-        dialog.msg_id_edit.setText("0F05")
+        dialog.msg_id_edit.setText("0FFD")
 
-        assert dialog.result_spec().msg_id == 0x0F05
+        assert dialog.result_spec().msg_id == 0x0FFD
 
-    def test_a_reserved_identifier_blocks_ok(self, qtbot):
+    def test_a_framing_identifier_blocks_ok(self, qtbot):
         from PySide6.QtWidgets import QDialogButtonBox
 
         dialog = CustomMessageDialog()
@@ -81,7 +81,7 @@ class TestDialog:
         dialog._revalidate()
 
         assert not dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
-        assert "FF00" in dialog.problems_label.text()
+        assert "FFFE" in dialog.problems_label.text()
 
     def test_bad_hex_blocks_ok(self, qtbot):
         from PySide6.QtWidgets import QDialogButtonBox
@@ -241,12 +241,12 @@ class TestIntegration:
         _define(
             window,
             category="KT",
-            msg_id=0x0F02,
+            msg_id=0x0FFE,
             cyclic=CyclicPolicy(enabled=True, period_ms=1000),
         )
         window._add_kt_step()
         window._select_row(0)
-        _select(window, 0x0F02)
+        _select(window, 0x0FFE)
 
         assert window.document.steps[0].cyclic is not None
         assert window.document.steps[0].cyclic.enabled

@@ -7,8 +7,8 @@ from detector_scenario_tool.domain.logs import LogRecord
 
 
 #: Written by this version; older files are still accepted.
-LOG_VERSION = "2"
-SUPPORTED_LOG_VERSIONS = ("1", "2")
+LOG_VERSION = "3"
+SUPPORTED_LOG_VERSIONS = ("1", "2", "3")
 
 
 class LogLoadError(ValueError):
@@ -85,7 +85,7 @@ def parse_log_line(raw_line: str, line_no: int = 1) -> LogRecord | None:
     except ValueError as exc:
         raise LogLoadError(f"Line {line_no}: invalid hex id value.") from exc
 
-    category = _category_from_msg_id(msg_id, line_no)
+    category = _read_category(fields, msg_id, line_no)
     payload = _parse_compact_hex(data_text, line_no)
 
     # v=2 adds the wire detail. A v=1 line simply has none of it, and the defaults are right.
@@ -149,16 +149,34 @@ def _load_json_records(text: str) -> list[LogRecord]:
     return result
 
 
-def _category_from_msg_id(msg_id: int, line_no: int) -> str:
-    if 0x0000 <= msg_id <= 0x00FF:
-        return "KU"
-    if 0x0100 <= msg_id <= 0x01FF:
-        return "KT"
-    if 0x0200 <= msg_id <= 0x02FF:
-        return "TS"
+def _read_category(fields: dict[str, str], msg_id: int, line_no: int) -> str:
+    """The category of a logged message: from the line if it says, otherwise from the catalogue.
+
+    v=3 writes `cat=` because identifiers are no longer grouped by category at all. Until
+    `Протокол_CAN_ГС_v2_1_Спутникс` they were (`0000…00FF` КУ, `0100…01FF` КТ, `0200…02FF` ТС) and
+    this function guessed from the range; v2.1 scatters КУ across `0F00…0F0C`, `0401`, `0A61`,
+    `0A62` and `FFE0`, so there is nothing left to guess from.
+    """
+    stated = fields.get("cat", "").strip().upper()
+    if stated:
+        if stated not in ("KU", "KT", "TS"):
+            raise LogLoadError(f"Line {line_no}: cat must be KU, KT or TS, not '{stated}'.")
+        return stated
+
+    return _category_from_catalogue(msg_id, line_no)
+
+
+def _category_from_catalogue(msg_id: int, line_no: int) -> str:
+    """For a v=1/v=2 line, which carries no category. Only the catalogue can say."""
+    from detector_scenario_tool.protocol import registry
+
+    for category in ("KU", "KT", "TS"):
+        if registry.find(category, msg_id) is not None:
+            return category
 
     raise LogLoadError(
-        f"Line {line_no}: msg id 0x{msg_id:04X} does not belong to KU/KT/TS ranges."
+        f"Line {line_no}: msg id 0x{msg_id:04X} is not in the catalogue, and the line does not "
+        f"say which category it belongs to. Re-record it, or add 'cat=' to the line."
     )
 
 
@@ -232,13 +250,15 @@ def _parse_compact_hex(value: str, line_no: int) -> bytes:
 def format_log_record_line(record: LogRecord) -> str:
     """Write the current format.
 
-    v=2 adds `can`, `frames` and `valid`. The extra fields are appended, and the reader treats
-    unknown ones as absent, so a v=2 line stays readable by anything that parsed v=1 loosely and
-    a v=1 file still loads here.
+    v=2 added `can`, `frames` and `valid`; v=3 adds `cat`, without which a line can only be
+    understood by looking its identifier up in whatever catalogue happens to be loaded. The extra
+    fields are appended and the reader treats unknown ones as absent, so a v=3 line stays readable
+    by anything that parsed v=1 loosely and older files still load here.
     """
     line = (
         f"DSTLOG|v={LOG_VERSION}|src={record.source}|ts={record.timestamp_ms}|"
-        f"dir={record.direction}|id={record.msg_id:04X}|data={record.payload.hex().upper()}"
+        f"dir={record.direction}|cat={record.category}|id={record.msg_id:04X}|"
+        f"data={record.payload.hex().upper()}"
     )
     if record.can_id is not None:
         line += f"|can={record.can_id:03X}"

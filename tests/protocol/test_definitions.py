@@ -135,6 +135,10 @@ def test_short_messages_use_the_documents_byte_numbering(spec):
     assert spec.content_origin == expected_origin
 
     layout = describe_layout(spec)
+    if not layout:
+        # v2.1 gives four commands and the version query no content whatsoever.
+        assert spec.length == 0
+        return
     assert layout[0][0] == expected_origin
 
 
@@ -149,7 +153,8 @@ class TestAckBehaviour:
 
     def test_every_acknowledged_command_lists_the_ack_as_a_response(self):
         for spec in registry.by_category("KU"):
-            assert any(r.is_ack and r.msg_id == 0x0201 for r in spec.follow_up), spec.symbol
+            ack_id = registry.by_symbol("TM_ACK").msg_id
+            assert any(r.is_ack and r.msg_id == ack_id for r in spec.follow_up), spec.symbol
 
     def test_follow_up_responses_are_known_telemetry_messages(self):
         known = {spec.msg_id for spec in registry.by_category("TS")}
@@ -176,24 +181,24 @@ class TestRegistry:
 
         custom = MessageDef(
             category="KU",
-            msg_id=0x0F00,
+            msg_id=0x0FFF,
             symbol="CUSTOM_TEST",
-            name_key="msg.KU.0000",
+            name_key="msg.cmd_telem_req",
             length=6,
             fields=(raw("content", 0, 6),),
             doc_ref="test",
         )
         try:
             registry.register(custom)
-            assert registry.find("KU", 0x0F00) is custom
+            assert registry.find("KU", 0x0FFF) is custom
             packed = pack_message(custom, {"content": "01 02 03"})
             assert packed == bytes([1, 2, 3, 0, 0, 0])
         finally:
-            registry.unregister("KU", 0x0F00)
+            registry.unregister("KU", 0x0FFF)
 
-        assert registry.find("KU", 0x0F00) is None
+        assert registry.find("KU", 0x0FFF) is None
 
     def test_registering_a_duplicate_is_refused(self):
-        existing = registry.find("KU", 0x0001)
+        existing = registry.by_symbol("CMD_STATUS_REQ")
         with pytest.raises(ValueError):
             registry.register(existing)

@@ -18,6 +18,7 @@ from detector_scenario_tool.domain.scenario import (
     WaitForTsStep,
 )
 from detector_scenario_tool.protocol.catalog import ProtocolCatalog
+from message_ids import STATUS_REQ, TM_ACK
 
 
 @pytest.fixture(autouse=True)
@@ -55,7 +56,7 @@ def make_send_step():
 
     def _make(
             category: str = "KU",
-            msg_id: int = 0x0001,
+            msg_id: int = STATUS_REQ,
             name: str = "",
             payload: dict | None = None,
             step_id: str = "s1",
@@ -78,7 +79,7 @@ def make_send_step():
 @pytest.fixture
 def make_wait_ts_step():
     def _make(
-            msg_id: int = 0x0201,
+            msg_id: int = TM_ACK,
             step_id: str = "w1",
             timeout_ms: int = 1000,
             bind_to_previous_ku: bool = True,

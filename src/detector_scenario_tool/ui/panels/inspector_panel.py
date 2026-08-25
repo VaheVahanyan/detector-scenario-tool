@@ -28,7 +28,7 @@ from detector_scenario_tool.domain.scenario import (
 )
 from detector_scenario_tool.i18n import tr
 from detector_scenario_tool.utils.labels import category_short, message_label
-from detector_scenario_tool.protocol import registry
+from detector_scenario_tool.protocol import registry, well_known
 from detector_scenario_tool.protocol.catalog import ProtocolCatalog
 from detector_scenario_tool.protocol.expected_responses import get_send_defaults
 from detector_scenario_tool.protocol.message_lengths import get_expected_message_length
@@ -599,10 +599,8 @@ class InspectorPanel(QWidget):
         self.wait_ts_ack_for_msg_id_spin.setValue(step.ack_for_msg_id or 0)
         self.wait_ts_require_ack_ok_checkbox.setChecked(step.require_ack_ok)
 
-        is_ack_wait = (
-            step.expected is not None
-            and step.expected.category == "TS"
-            and step.expected.msg_id == 0x0201
+        is_ack_wait = step.expected is not None and well_known.is_ack(
+            step.expected.category, step.expected.msg_id
         )
         self.wait_ts_bind_prev_ku_checkbox.setEnabled(is_ack_wait)
         self.wait_ts_ack_for_msg_id_spin.setEnabled(is_ack_wait)
@@ -796,10 +794,8 @@ class InspectorPanel(QWidget):
 
         self.current_step.timeout_ms = self.wait_ts_timeout_spin.value()
 
-        is_ack_wait = (
-            self.current_step.expected is not None
-            and self.current_step.expected.category == "TS"
-            and self.current_step.expected.msg_id == 0x0201
+        is_ack_wait = self.current_step.expected is not None and well_known.is_ack(
+            self.current_step.expected.category, self.current_step.expected.msg_id
         )
 
         self.wait_ts_bind_prev_ku_checkbox.setEnabled(is_ack_wait)

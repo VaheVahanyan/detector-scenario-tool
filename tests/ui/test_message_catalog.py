@@ -21,10 +21,11 @@ from detector_scenario_tool.ui.dialogs.message_catalog_dialog import (
     SOURCE_SUPPRESSED,
     MessageCatalogDialog,
 )
+import message_ids
 
-ERASE = ("KU", 0x0008)
-TEST = ("KU", 0x0009)
-CUSTOM = ("KU", 0x0F01)
+ERASE = ("KU", message_ids.ERASE)
+TEST = ("KU", message_ids.TEST)
+CUSTOM = ("KU", message_ids.UNKNOWN)
 
 
 @pytest.fixture(autouse=True)
@@ -103,7 +104,7 @@ class TestFiltering:
 
     def test_by_identifier(self, dialog):
         d = dialog()
-        d.search_edit.setText("0008")
+        d.search_edit.setText(f"{message_ids.ERASE:04X}")
 
         assert [row["key"] for row in d.visible_rows()] == [ERASE]
 
@@ -143,7 +144,7 @@ class TestOverriding:
     def test_an_accidental_collision_still_is(self):
         from detector_scenario_tool.domain.custom_messages import validate_spec
 
-        spec = CustomMessageSpec(category="KU", msg_id=0x0008)
+        spec = CustomMessageSpec(category="KU", msg_id=message_ids.ERASE)
         codes = [code for code, _ in validate_spec(spec)]
 
         assert "custom.shadows_catalogue" in codes

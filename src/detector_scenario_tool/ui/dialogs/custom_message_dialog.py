@@ -69,7 +69,7 @@ class CustomMessageDialog(QDialog):
             self.category_combo.addItem(category_short(code), code)
 
         self.msg_id_edit = QLineEdit()
-        self.msg_id_edit.setPlaceholderText("0x0F01")
+        self.msg_id_edit.setPlaceholderText("0x0FFF")
 
         self.length_spin = QSpinBox()
         self.length_spin.setRange(0, MAX_CUSTOM_LENGTH)
@@ -247,7 +247,7 @@ class CustomMessageDialog(QDialog):
 #: Problems that make the definition unusable rather than merely questionable. Shadowing a
 #: catalogue command is here because the registry would refuse it anyway.
 _BLOCKING = {
-    "custom.reserved_msg_id",
+    "custom.unusable_msg_id",
     "custom.content_not_hex",
     "custom.address_out_of_range",
     "custom.shadows_catalogue",

@@ -42,7 +42,7 @@ NOT_TEXT = re.compile(r"^[\W\d_]*$")
 ALLOWED = {
     "Detector Scenario Tool",
     # A hex identifier shown as an example of the expected format.
-    "0x0F01",
+    "0x0FFF",
 }
 
 

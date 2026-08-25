@@ -24,9 +24,9 @@ from detector_scenario_tool.protocol import registry
 from detector_scenario_tool.services.scenario_runner import ScenarioRunner, StepOutcome
 from detector_scenario_tool.transport.simulator import DetectorSimulator
 from detector_scenario_tool.transport.virtual import VirtualBackend
+from message_ids import STATUS_REQ, TLM_MAGFIELD, TLM_MCILWAIN
 
-MCILWAIN = 0x0100
-STATUS_REQ = 0x0001
+MCILWAIN = TLM_MCILWAIN
 
 
 class FakeClock:
@@ -187,8 +187,8 @@ class TestRepeating:
 
     def test_several_cyclic_commands_run_independently(self, backend, clock, simulator):
         document = _document(
-            _tc(0x0100, "s1", CyclicPolicy(enabled=True, period_ms=1000)),
-            _tc(0xF221, "s2", CyclicPolicy(enabled=True, period_ms=3000)),
+            _tc(TLM_MCILWAIN, "s1", CyclicPolicy(enabled=True, period_ms=1000)),
+            _tc(TLM_MAGFIELD, "s2", CyclicPolicy(enabled=True, period_ms=3000)),
             WaitTimeStep(id="w", kind=StepKind.WAIT_TIME, delay_ms=90_000),
         )
         runner = ScenarioRunner(backend, document, clock=clock)
@@ -201,8 +201,8 @@ class TestRepeating:
             runner.tick()
 
         sent = _sent_ids(simulator)
-        assert sent.count(0x0100) == 7      # once, then every second
-        assert sent.count(0xF221) == 3      # once, then every three seconds
+        assert sent.count(TLM_MCILWAIN) == 7      # once, then every second
+        assert sent.count(TLM_MAGFIELD) == 3      # once, then every three seconds
 
 
 class TestSingleShot:

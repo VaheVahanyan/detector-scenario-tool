@@ -20,6 +20,7 @@ from detector_scenario_tool.protocol.modes import OPERATIONAL_MODES
 from detector_scenario_tool.transport.unican import (
     MAX_SHORT_PAYLOAD,
     RESERVED_MSG_ID_START,
+    UNUSABLE_MSG_IDS,
 )
 
 #: Longest message in the protocol is ТС «Результаты теста ППЗУ» at 6146 bytes; allow a little
@@ -386,12 +387,15 @@ def validate_spec(
             )
             break
 
-    if spec.msg_id >= RESERVED_MSG_ID_START:
-        # FFFEh and FFFFh are the long-message start and error frames; using them would corrupt
-        # the framing rather than merely be rejected.
-        issues.append(
-            ("custom.reserved_msg_id", {"msg": f"0x{spec.msg_id:04X}"})
-        )
+    if spec.msg_id in UNUSABLE_MSG_IDS:
+        # The long-message start and the error frame. Using either corrupts the framing itself,
+        # so this stays a refusal.
+        issues.append(("custom.unusable_msg_id", {"msg": f"0x{spec.msg_id:04X}"}))
+    elif spec.msg_id >= RESERVED_MSG_ID_START:
+        # The rest of FF00…FFFF is spoken for by the bus vendor rather than unusable — the
+        # specification itself allocates FFE0h/FFE1h out of it. A catalogue message may live here;
+        # a hand-written one is asking for a collision, so warn without blocking.
+        issues.append(("custom.reserved_msg_id", {"msg": f"0x{spec.msg_id:04X}"}))
 
     if spec.length > MAX_SHORT_PAYLOAD and spec.force_long is False:
         issues.append(

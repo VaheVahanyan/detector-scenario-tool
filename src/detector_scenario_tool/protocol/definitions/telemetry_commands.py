@@ -1,7 +1,7 @@
-"""Команды телеметрии (КТ / TC) — Протокол_CAN_ГС_v2 §3.
+"""Команды телеметрии (КТ / TC) — Протокол_CAN_ГС_v2_1_Спутникс §3.
 
 All three are long UniCAN messages pushed by the БВС, valid only in OBSERVE, and never
-acknowledged (§2.3: «на КТ ТС «Квитанция» не выдается»). Each produces one НИ format.
+acknowledged (§5.1.2: «На КТ ... НА не выдает ТС «Квитанция»»). Each produces one НИ format.
 
 Byte offsets are absolute here: long messages are numbered from byte 0 in the document.
 """
@@ -32,7 +32,7 @@ TELEMETRY_COMMANDS: tuple[MessageDef, ...] = (
         category="KT",
         msg_id=0xF210,
         symbol="TLM_TIME_ORBIT_ATT",
-        name_key="msg.KT.F210",
+        name_key="msg.tlm_time_orbit_att",
         length=125,
         fields=(
             u64("system_time", 0),
@@ -64,13 +64,13 @@ TELEMETRY_COMMANDS: tuple[MessageDef, ...] = (
         ack=AckBehaviour.NONE,
         follow_up=(),
         cyclic_default=CYCLIC_20S,
-        doc_ref="Протокол_CAN_ГС_v2 §3.1 (НИ формат 05h)",
+        doc_ref="Протокол_CAN_ГС_v2_1_Спутникс §3.1 (НИ формат 05h)",
     ),
     MessageDef(
         category="KT",
         msg_id=0xF221,
         symbol="TLM_MAGFIELD",
-        name_key="msg.KT.F221",
+        name_key="msg.tlm_magfield",
         length=76,
         fields=(
             *_vector("measured_magnetic_field", 0),
@@ -84,13 +84,13 @@ TELEMETRY_COMMANDS: tuple[MessageDef, ...] = (
         ack=AckBehaviour.NONE,
         follow_up=(),
         cyclic_default=CYCLIC_20S,
-        doc_ref="Протокол_CAN_ГС_v2 §3.2 (НИ формат 06h)",
+        doc_ref="Протокол_CAN_ГС_v2_1_Спутникс §3.2 (НИ формат 06h)",
     ),
     MessageDef(
         category="KT",
-        msg_id=0x0100,
+        msg_id=0x0E00,
         symbol="TLM_MCILWAIN",
-        name_key="msg.KT.0100",
+        name_key="msg.tlm_mcilwain",
         length=24,
         fields=(
             u64("system_time", 0),
@@ -104,6 +104,6 @@ TELEMETRY_COMMANDS: tuple[MessageDef, ...] = (
         ack=AckBehaviour.NONE,
         follow_up=(),
         cyclic_default=CYCLIC_20S,
-        doc_ref="Протокол_CAN_ГС_v2 §3.3 (НИ формат 07h)",
+        doc_ref="Протокол_CAN_ГС_v2_1_Спутникс §3.3 (НИ формат 07h)",
     ),
 )

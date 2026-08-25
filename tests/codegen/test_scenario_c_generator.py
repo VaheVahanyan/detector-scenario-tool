@@ -29,6 +29,7 @@ from detector_scenario_tool.domain.scenario import (
 from detector_scenario_tool.protocol import registry
 from detector_scenario_tool.services.custom_message_sync import CustomMessageSync
 from detector_scenario_tool.storage.packed_export import build_packed_scenario_export
+from message_ids import SET_TIME, STATUS_REQ, TLM_MCILWAIN, TM_ACK
 
 
 def _send(category: str, msg_id: int, sid: str = "s", **kw) -> SendMessageStep:
@@ -65,12 +66,12 @@ def custom_sync():
 
 class TestSourceStructure:
     def test_a_send_becomes_a_runtime_call(self):
-        files = generate_scenario_c_files(_document(_send("KU", 0x0001)))
-        assert "scenario_send_ku(0x0001u," in files.source_text
+        files = generate_scenario_c_files(_document(_send("KU", STATUS_REQ)))
+        assert f"scenario_send_ku(0x{STATUS_REQ:04X}u," in files.source_text
 
     def test_a_telemetry_command_uses_its_own_entry_point(self):
-        files = generate_scenario_c_files(_document(_send("KT", 0x0100)))
-        assert "scenario_send_kt(0x0100u," in files.source_text
+        files = generate_scenario_c_files(_document(_send("KT", TLM_MCILWAIN)))
+        assert f"scenario_send_kt(0x{TLM_MCILWAIN:04X}u," in files.source_text
 
     def test_a_pause_becomes_a_wait(self):
         files = generate_scenario_c_files(
@@ -83,15 +84,15 @@ class TestSourceStructure:
         step = WaitForTsStep(
             id="w",
             kind=StepKind.WAIT_FOR_TS,
-            expected=MessageRef(category="TS", msg_id=0x0201, name=""),
+            expected=MessageRef(category="TS", msg_id=TM_ACK, name=""),
         )
         files = generate_scenario_c_files(_document(step))
 
-        assert "0x0201" in files.source_text
+        assert f"0x{TM_ACK:04X}" in files.source_text
         assert "scenario_send" not in files.source_text
 
     def test_a_disabled_step_is_not_executed_but_is_recorded(self):
-        step = _send("KU", 0x0001)
+        step = _send("KU", STATUS_REQ)
         step.enabled = False
         files = generate_scenario_c_files(_document(step))
 
@@ -112,10 +113,10 @@ class TestSourceStructure:
 
 class TestCyclicTable:
     def test_a_repeating_send_reaches_the_table(self):
-        step = _send("KT", 0x0100, cyclic=CyclicPolicy(enabled=True, period_ms=20_000))
+        step = _send("KT", TLM_MCILWAIN, cyclic=CyclicPolicy(enabled=True, period_ms=20_000))
         files = generate_scenario_c_files(_document(step))
 
-        assert "{ 0x0100u, 20000u, 0u }" in files.source_text
+        assert f"{{ 0x{TLM_MCILWAIN:04X}u, 20000u, 0u }}" in files.source_text
         assert "scenario_cyclic_count = 1u" in files.source_text
 
     def test_the_table_is_declared_in_the_header(self):
@@ -125,68 +126,68 @@ class TestCyclicTable:
 
     def test_max_repeats_is_carried_over(self):
         step = _send(
-            "KT", 0x0100, cyclic=CyclicPolicy(enabled=True, period_ms=5000, max_repeats=4)
+            "KT", TLM_MCILWAIN, cyclic=CyclicPolicy(enabled=True, period_ms=5000, max_repeats=4)
         )
         files = generate_scenario_c_files(_document(step))
-        assert "{ 0x0100u, 5000u, 4u }" in files.source_text
+        assert f"{{ 0x{TLM_MCILWAIN:04X}u, 5000u, 4u }}" in files.source_text
 
     def test_an_empty_table_is_still_valid_c(self):
         """A zero-length array is not legal C, so the count is what says "none"."""
-        files = generate_scenario_c_files(_document(_send("KU", 0x0001)))
+        files = generate_scenario_c_files(_document(_send("KU", STATUS_REQ)))
 
         assert "scenario_cyclic_table[] =" in files.source_text
         assert "scenario_cyclic_count = 0u" in files.source_text
         assert "{ 0u, 0u, 0u }" in files.source_text
 
     def test_a_single_shot_stays_out_of_the_table(self):
-        step = _send("KT", 0x0100, cyclic=CyclicPolicy(enabled=False))
+        step = _send("KT", TLM_MCILWAIN, cyclic=CyclicPolicy(enabled=False))
         files = generate_scenario_c_files(_document(step))
         assert "scenario_cyclic_count = 0u" in files.source_text
 
     def test_a_disabled_repeating_step_stays_out(self):
-        step = _send("KT", 0x0100, cyclic=CyclicPolicy(enabled=True, period_ms=1000))
+        step = _send("KT", TLM_MCILWAIN, cyclic=CyclicPolicy(enabled=True, period_ms=1000))
         step.enabled = False
         files = generate_scenario_c_files(_document(step))
         assert "scenario_cyclic_count = 0u" in files.source_text
 
     def test_the_repeat_is_still_sent_once_by_the_linear_sequence(self):
         """The table is the cadence; the first send is part of the scenario."""
-        step = _send("KT", 0x0100, cyclic=CyclicPolicy(enabled=True, period_ms=1000))
+        step = _send("KT", TLM_MCILWAIN, cyclic=CyclicPolicy(enabled=True, period_ms=1000))
         files = generate_scenario_c_files(_document(step))
-        assert "scenario_send_kt(0x0100u," in files.source_text
+        assert f"scenario_send_kt(0x{TLM_MCILWAIN:04X}u," in files.source_text
 
 
 class TestCustomMessages:
     def test_a_user_defined_message_is_emitted_as_raw_bytes(self, custom_sync):
-        spec = CustomMessageSpec(name="Test", msg_id=0x0F01, length=4, content_hex="DE AD BE EF")
+        spec = CustomMessageSpec(name="Test", msg_id=0x0FFF, length=4, content_hex="DE AD BE EF")
         custom_sync.apply([spec])
 
-        files = generate_scenario_c_files(_document(_send("KU", 0x0F01)))
+        files = generate_scenario_c_files(_document(_send("KU", 0x0FFF)))
 
-        assert "scenario_send_ku(0x0F01u," in files.source_text
+        assert "scenario_send_ku(0x0FFFu," in files.source_text
         assert "0xDE, 0xAD, 0xBE, 0xEF" in files.source_text
 
     def test_it_is_marked_in_the_metadata(self, custom_sync):
-        custom_sync.apply([CustomMessageSpec(msg_id=0x0F01, length=4, content_hex="01020304")])
-        files = generate_scenario_c_files(_document(_send("KU", 0x0F01)))
+        custom_sync.apply([CustomMessageSpec(msg_id=0x0FFF, length=4, content_hex="01020304")])
+        files = generate_scenario_c_files(_document(_send("KU", 0x0FFF)))
 
         assert "custom=true" in files.meta_text
 
     def test_a_catalogue_message_is_not_marked(self):
-        files = generate_scenario_c_files(_document(_send("KU", 0x0001)))
+        files = generate_scenario_c_files(_document(_send("KU", STATUS_REQ)))
         assert "custom=true" not in files.meta_text
 
 
 class TestMetadata:
     def test_the_cyclic_period_is_recorded(self):
-        step = _send("KT", 0x0100, cyclic=CyclicPolicy(enabled=True, period_ms=20_000))
+        step = _send("KT", TLM_MCILWAIN, cyclic=CyclicPolicy(enabled=True, period_ms=20_000))
         files = generate_scenario_c_files(_document(step))
 
         assert "cyclic=true" in files.meta_text
         assert "cyclic_period_ms=20000" in files.meta_text
 
     def test_a_non_repeating_step_says_so(self):
-        files = generate_scenario_c_files(_document(_send("KU", 0x0001)))
+        files = generate_scenario_c_files(_document(_send("KU", STATUS_REQ)))
         assert "cyclic=false" in files.meta_text
 
 
@@ -216,7 +217,7 @@ class TestContract:
 
 class TestFileOutput:
     def test_all_four_files_are_written(self, tmp_path):
-        files = save_generated_scenario_files(_document(_send("KU", 0x0001)), tmp_path)
+        files = save_generated_scenario_files(_document(_send("KU", STATUS_REQ)), tmp_path)
 
         for name in (
             files.header_filename,
@@ -235,19 +236,20 @@ class TestPackedExport:
     def test_it_stamps_the_schema_and_protocol_version(self):
         export = build_packed_scenario_export(_document())
 
-        assert export["schema_version"] == 2
-        assert export["protocol_version"] == "CAN_v2"
+        assert export["schema_version"] == 3
+        assert export["protocol_version"] == "CAN_v2_1"
 
     def test_packed_bytes_are_included(self):
-        export = build_packed_scenario_export(_document(_send("KU", 0x0001)))
+        export = build_packed_scenario_export(_document(_send("KU", STATUS_REQ)))
         packed = export["steps"][0]["packed"]
 
-        assert packed["payload_length_actual"] == 6
-        assert packed["hex"] == "AA AA AA AA AA AA"
+        # §2.2 gives «Запрос статуса» a length of 0; v2 padded it to six AAh bytes.
+        assert packed["payload_length_actual"] == 0
+        assert packed["hex"] == ""
         assert packed["pack_ok"] is True
 
     def test_a_packing_failure_is_reported_rather_than_hidden(self):
-        step = _send("KU", 0x0002, payload={"board_time_ms": 99_999, "board_time_s": 0})
+        step = _send("KU", SET_TIME, payload={"board_time_ms": 99_999, "board_time_s": 0})
         export = build_packed_scenario_export(_document(step))
         packed = export["steps"][0]["packed"]
 
@@ -255,15 +257,15 @@ class TestPackedExport:
         assert packed["error"]
 
     def test_repeats_are_listed_separately(self):
-        step = _send("KT", 0x0100, cyclic=CyclicPolicy(enabled=True, period_ms=20_000))
+        step = _send("KT", TLM_MCILWAIN, cyclic=CyclicPolicy(enabled=True, period_ms=20_000))
         export = build_packed_scenario_export(_document(step))
 
         assert export["cyclic"] == [
             {
                 "step_index": 0,
                 "category": "KT",
-                "msg_id": 0x0100,
-                "msg_id_hex": "0x0100",
+                "msg_id": TLM_MCILWAIN,
+                "msg_id_hex": f"0x{TLM_MCILWAIN:04X}",
                 "period_ms": 20_000,
                 "max_repeats": None,
             }
@@ -271,11 +273,11 @@ class TestPackedExport:
 
     def test_user_defined_messages_travel_with_the_export(self):
         """A consumer has nowhere else to look them up."""
-        spec = CustomMessageSpec(name="X", msg_id=0x0F01, length=4, content_hex="DE AD BE EF")
+        spec = CustomMessageSpec(name="X", msg_id=0x0FFF, length=4, content_hex="DE AD BE EF")
         export = build_packed_scenario_export(_document(custom_messages=[spec]))
 
         assert len(export["custom_messages"]) == 1
-        assert export["custom_messages"][0]["msg_id_hex"] == "0x0F01"
+        assert export["custom_messages"][0]["msg_id_hex"] == "0x0FFF"
         assert export["custom_messages"][0]["content_hex"] == "DE AD BE EF"
 
     def test_migration_notes_are_carried_over(self):
@@ -288,10 +290,10 @@ class TestPackedExport:
         assert export["migration_notes"][0]["code"] == "migration.upgraded"
 
     def test_the_export_is_json_serialisable(self):
-        spec = CustomMessageSpec(msg_id=0x0F01, length=2, content_hex="0102")
+        spec = CustomMessageSpec(msg_id=0x0FFF, length=2, content_hex="0102")
         document = _document(
-            _send("KU", 0x0001),
-            _send("KT", 0x0100, cyclic=CyclicPolicy(enabled=True, period_ms=1000)),
+            _send("KU", STATUS_REQ),
+            _send("KT", TLM_MCILWAIN, cyclic=CyclicPolicy(enabled=True, period_ms=1000)),
             custom_messages=[spec],
         )
         json.dumps(build_packed_scenario_export(document), ensure_ascii=False)

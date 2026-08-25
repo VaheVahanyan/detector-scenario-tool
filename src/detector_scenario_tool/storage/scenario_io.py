@@ -8,10 +8,13 @@ from detector_scenario_tool.domain.custom_messages import (
     CustomByteLayout,
     CustomMessageSpec,
 )
-from detector_scenario_tool.storage.migration import CURRENT_SCHEMA_VERSION, migrate_document
+from detector_scenario_tool.storage.migration import (
+    CURRENT_SCHEMA_VERSION,
+    PROTOCOL_VERSION,
+    migrate_document,
+)
 
 #: Stamped into every saved file so a future revision can migrate without guessing.
-PROTOCOL_VERSION = "CAN_v2"
 from detector_scenario_tool.domain.scenario import (
     AckPolicy,
     CyclicPolicy,
