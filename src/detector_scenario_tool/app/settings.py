@@ -10,7 +10,12 @@ import json
 from pathlib import Path
 
 from detector_scenario_tool.transport.backend import ConnectionSettings
-from detector_scenario_tool.transport_defaults import DEFAULT_BITRATE
+from detector_scenario_tool.transport_defaults import (
+    DEFAULT_BITRATE,
+    DEFAULT_BOARD_LOG_ID,
+    DEFAULT_BVS_ADDRESS,
+    DEFAULT_NA_ADDRESS,
+)
 
 APP_DIR_NAME = "detector-scenario-tool"
 
@@ -50,6 +55,9 @@ def load_connection_settings() -> ConnectionSettings:
         channel=raw.get("channel", ""),
         bitrate=int(raw.get("bitrate", DEFAULT_BITRATE)),
         extended_ids=bool(raw.get("extended_ids", False)),
+        na_address=int(raw.get("na_address", DEFAULT_NA_ADDRESS)),
+        bvs_address=int(raw.get("bvs_address", DEFAULT_BVS_ADDRESS)),
+        board_log_id=int(raw.get("board_log_id", DEFAULT_BOARD_LOG_ID)),
     )
 
 
@@ -60,6 +68,9 @@ def save_connection_settings(settings: ConnectionSettings) -> None:
         "channel": settings.channel,
         "bitrate": settings.bitrate,
         "extended_ids": settings.extended_ids,
+        "na_address": settings.na_address,
+        "bvs_address": settings.bvs_address,
+        "board_log_id": settings.board_log_id,
     }
     save(data)
 

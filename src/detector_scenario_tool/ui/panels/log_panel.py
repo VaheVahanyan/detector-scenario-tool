@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from detector_scenario_tool.domain.log_roles import normalize_log_source
-from detector_scenario_tool.utils.labels import CATEGORY_CODES, category_short
+from detector_scenario_tool.utils.labels import LOG_RECORD_CATEGORY_CODES, category_short
 from detector_scenario_tool.domain.logs import LogRecord
 from detector_scenario_tool.i18n import tr
 from detector_scenario_tool.protocol.catalog import ProtocolCatalog
@@ -258,7 +258,9 @@ class LogPanel(QWidget):
         self.category_filter.blockSignals(True)
         self.category_filter.clear()
         self.category_filter.addItem(tr("logs.filter.category.all"), "all")
-        for code in CATEGORY_CODES:
+        # Includes the board's own log output: selecting anything else is how a run is watched
+        # without the МК's chatter in the way.
+        for code in LOG_RECORD_CATEGORY_CODES:
             self.category_filter.addItem(category_short(code), code)
         idx = self.category_filter.findData(cat_code if cat_code is not None else "all")
         self.category_filter.setCurrentIndex(idx if idx >= 0 else 0)

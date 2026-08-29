@@ -9,6 +9,7 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from detector_scenario_tool.domain.scenario import ScenarioDocument
+from detector_scenario_tool.services.bus_monitor import BusMonitor
 from detector_scenario_tool.services.scenario_runner import RunState, ScenarioRunner
 from detector_scenario_tool.transport.backend import (
     CanBackend,
@@ -25,12 +26,15 @@ TICK_INTERVAL_MS = 10
 class RunController(QObject):
     connection_changed = Signal(bool)     # connected
     error = Signal(str)
+    record_received = Signal(object)      # LogRecord, from the monitor between runs
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.backend: CanBackend | None = None
         self.runner: ScenarioRunner | None = None
         self.settings = ConnectionSettings()
+        #: Reads the bus whenever no runner is doing it. See `_tick`.
+        self.monitor: BusMonitor | None = None
 
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_INTERVAL_MS)
@@ -58,14 +62,27 @@ class RunController(QObject):
 
         self.settings = settings
         self.backend = backend
+        self.monitor = BusMonitor(
+            extended=settings.extended_ids,
+            board_log_id=settings.board_log_id,
+        )
+        # Being connected is enough to start listening. The bus does not wait for a run to begin,
+        # and neither should the log: the board talks before, between and after runs.
+        self._sync_timer()
         self.connection_changed.emit(True)
         return True
 
     def disconnect(self) -> None:
         self.stop()
+        # The runner goes with the connection it was driving. Keeping it would leave `_tick`
+        # servicing a runner bound to a closed backend, and the monitor would never get the bus
+        # back after a reconnect.
+        self.runner = None
         if self.backend is not None:
             self.backend.close()
             self.backend = None
+            self.monitor = None
+            self._sync_timer()
             self.connection_changed.emit(False)
 
     # -- running -----------------------------------------------------------------------
@@ -83,13 +100,15 @@ class RunController(QObject):
         self.runner = ScenarioRunner(
             self.backend,
             document,
+            na_address=self.settings.na_address,
+            bvs_address=self.settings.bvs_address,
             stop_on_failure=stop_on_failure,
             send_telemetry_commands=send_telemetry_commands,
             parent=self,
         )
         self.runner.state_changed.connect(self._on_state_changed)
         self.runner.start()
-        self._timer.start()
+        self._sync_timer()
         return self.runner
 
     def pause(self) -> None:
@@ -105,15 +124,38 @@ class RunController(QObject):
             self.runner.step_once()
 
     def stop(self) -> None:
-        self._timer.stop()
         if self.runner is not None:
             self.runner.stop()
+        # Stopping the run does not stop listening — a late answer is exactly what one wants in
+        # the log after a step gave up on it.
+        self._sync_timer()
+
+    # -- the loop ----------------------------------------------------------------------
 
     def _tick(self) -> None:
-        if self.runner is None:
+        """One reader at a time.
+
+        While a runner exists it services the bus itself, including after the run has finished: it
+        keeps a reassembler with any half-received transfer in it, so handing the bus back to a
+        second reader mid-frame would lose the rest of the message.
+        """
+        if self.runner is not None:
+            self.runner.tick()
             return
-        self.runner.tick()
+
+        if self.backend is None or self.monitor is None:
+            return
+
+        for record in self.monitor.poll(self.backend):
+            self.record_received.emit(record)
+
+    def _sync_timer(self) -> None:
+        """The timer runs for as long as there is an open backend to read."""
+        if self.backend is not None and self.backend.is_open:
+            self._timer.start()
+        else:
+            self._timer.stop()
 
     def _on_state_changed(self, state: str) -> None:
         if not RunState(state).is_active:
-            self._timer.stop()
+            self._sync_timer()

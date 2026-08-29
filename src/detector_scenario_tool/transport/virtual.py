@@ -24,13 +24,15 @@ class VirtualBackend(CanBackend):
             self,
             settings: ConnectionSettings | None = None,
             simulator: DetectorSimulator | None = None,
-            na_address: int = DEFAULT_NA_ADDRESS,
-            bvs_address: int = DEFAULT_BVS_ADDRESS,
+            na_address: int | None = None,
+            bvs_address: int | None = None,
     ) -> None:
         super().__init__(settings or ConnectionSettings(backend="virtual"))
         self.simulator = simulator if simulator is not None else DetectorSimulator()
-        self.na_address = na_address
-        self.bvs_address = bvs_address
+        # The connection says who is on the bus; the arguments stay for tests that want to answer
+        # from somewhere unexpected.
+        self.na_address = self.settings.na_address if na_address is None else na_address
+        self.bvs_address = self.settings.bvs_address if bvs_address is None else bvs_address
 
         self._incoming: deque[CanFrame] = deque()
         self._sent: list[CanFrame] = []

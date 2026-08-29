@@ -271,6 +271,14 @@ RU: dict[str, str] = {
     "value.none": "нет",
     # -- log decoding --------------------------------------------------------------------
     "logdecode.unknown_message": "Неизвестное сообщение, {length} байт",
+    "logdecode.board_log.title": "Отладочный вывод платы, идентификатор {msg}",
+    "logdecode.board_log.binary": "Двоичные данные, {length} байт — на текст не похоже",
+    "logdecode.legacy_v2": "Нумерация протокола v2: сейчас это {label}",
+    "logdecode.legacy_v2.hint": (
+        "Идентификатор {msg} принадлежит Протокол_CAN_ГС_v2. Приложение работает по v2.1, поэтому "
+        "таким сообщением шаг ожидания не закрывается. Похоже, на стенде прошивка предыдущей "
+        "версии протокола."
+    ),
     "logdecode.undecodable": "Не удалось расшифровать, {length} байт",
     "logdecode.no_fields": "{length} байт",
     "logdecode.more_fields": " (+{count})",
@@ -603,6 +611,14 @@ EN: dict[str, str] = {
     "value.none": "none",
     # -- log decoding --------------------------------------------------------------------
     "logdecode.unknown_message": "Unknown message, {length} bytes",
+    "logdecode.board_log.title": "Board debug output, identifier {msg}",
+    "logdecode.board_log.binary": "Binary data, {length} bytes — does not look like text",
+    "logdecode.legacy_v2": "Protocol v2 numbering: this is now {label}",
+    "logdecode.legacy_v2.hint": (
+        "Identifier {msg} belongs to Протокол_CAN_ГС_v2. This application speaks v2.1, so a "
+        "message like this does not complete a wait step. The board appears to be running the "
+        "previous revision of the protocol."
+    ),
     "logdecode.undecodable": "Could not decode, {length} bytes",
     "logdecode.no_fields": "{length} bytes",
     "logdecode.more_fields": " (+{count})",

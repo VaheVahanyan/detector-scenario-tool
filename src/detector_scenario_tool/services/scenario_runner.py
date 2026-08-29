@@ -17,7 +17,8 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, Signal
 
-from detector_scenario_tool.domain.logs import LogRecord
+from detector_scenario_tool.domain.log_roles import HOST_SOURCE
+from detector_scenario_tool.domain.logs import LOG_CATEGORY, LogRecord
 from detector_scenario_tool.domain.scenario import (
     AckPolicy,
     CommentStep,
@@ -29,6 +30,11 @@ from detector_scenario_tool.domain.scenario import (
 from detector_scenario_tool.protocol import registry, well_known
 from detector_scenario_tool.protocol.errors import AckErrorCode, decode_ack_status
 from detector_scenario_tool.protocol.fields import PackingError, pack_message, unpack_message
+from detector_scenario_tool.services.bus_monitor import (
+    BoardLogAssembler,
+    record_for_message,
+    record_for_problem,
+)
 from detector_scenario_tool.transport.backend import CanBackend
 from detector_scenario_tool.transport.unican import (
     Reassembler,
@@ -41,9 +47,6 @@ from detector_scenario_tool.transport_defaults import DEFAULT_BVS_ADDRESS, DEFAU
 
 #: How many unclaimed messages to keep for a later wait step.
 INBOX_LIMIT = 64
-
-HOST_SOURCE = "host"
-DETECTOR_SOURCE = "detector"
 
 
 class RunState(str, Enum):
@@ -150,6 +153,9 @@ class ScenarioRunner(QObject):
         self._pending: _Pending | None = None
         self._single_step = False
         self._reassembler = Reassembler(extended=backend.settings.extended_ids)
+        # The controller's debug log shares the bus but not the framing, and must never reach the
+        # reassembler — see `BoardLogAssembler`.
+        self._board_log = BoardLogAssembler(backend.settings.board_log_id, clock=self._clock)
         # Telemetry can arrive faster than the runner advances — the acknowledgement and the
         # status that follows it come back-to-back — so messages nothing is waiting for yet are
         # held here until the step that wants them starts.
@@ -165,6 +171,7 @@ class ScenarioRunner(QObject):
         self._inbox.clear()
         self._cyclic.clear()
         self._reassembler.reset()
+        self._board_log.reset()
         self.summary = RunSummary(steps_total=len(self.document.steps))
         self._set_state(RunState.RUNNING)
 
@@ -376,6 +383,10 @@ class ScenarioRunner(QObject):
             return
 
         for frame in self.backend.drain():
+            if self._board_log.owns(frame):
+                self._emit_board_log(self._board_log.feed(frame))
+                continue
+
             self._last_frame_id = frame.can_id
             decoded = self._reassembler.feed(frame)
 
@@ -384,41 +395,27 @@ class ScenarioRunner(QObject):
             elif isinstance(decoded, (UniCanErrorFrame, UniCanDecodeError)):
                 self._on_bus_problem(decoded, frame)
 
-    def _on_bus_problem(self, problem, frame) -> None:
-        """Surface a framing failure as a log row too, not only as a status line.
+        self._emit_board_log(self._board_log.flush())
 
-        A frame that could not be reassembled is exactly what the raw view exists to show; letting
-        it vanish is how a protocol bug stays invisible.
-        """
+    def _emit_board_log(self, records) -> None:
+        """Log lines are recorded and go no further: they answer nothing and satisfy no step."""
+        for record in records:
+            self.message_received.emit(record)
+
+    def _on_bus_problem(self, problem, frame) -> None:
+        """Surface a framing failure as a log row too, not only as a status line."""
         self.bus_error.emit(problem)
-        self.message_received.emit(
-            LogRecord(
-                timestamp_ms=int(self._now()),
-                direction="rx",
-                category="TS",
-                msg_id=getattr(problem, "failed_msg_id", None) or getattr(problem, "msg_id", 0) or 0,
-                payload=bytes(frame.data),
-                source=DETECTOR_SOURCE,
-                note=getattr(problem, "detail", "") or str(getattr(problem, "code", "")),
-                can_id=frame.can_id,
-                valid=False,
-            )
-        )
+        self.message_received.emit(record_for_problem(problem, frame, int(self._now())))
 
     def _on_message(self, message: UniCanMessage) -> None:
-        spec = registry.find("TS", message.msg_id)
-        category = spec.category if spec is not None else "TS"
-
-        record = LogRecord(
-            timestamp_ms=int(self._now()),
-            direction="rx",
-            category=category,
-            msg_id=message.msg_id,
-            payload=message.payload,
-            source=DETECTOR_SOURCE,
-            can_id=self._last_frame_id,
-        )
+        record = record_for_message(message, int(self._now()), can_id=self._last_frame_id)
         self.message_received.emit(record)
+
+        if record.category == LOG_CATEGORY:
+            # The board's own debug output, not an answer. It is worth showing — hence the record
+            # above — but it must not satisfy the current step, and it must not sit in the inbox
+            # either: a run where the МК chatters would otherwise push real telemetry out of it.
+            return
 
         # Paused means "stop advancing", not "stop listening": the log stays live and anything
         # that arrives is kept for whenever the run resumes.

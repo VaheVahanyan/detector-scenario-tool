@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from detector_scenario_tool.app import settings as app_settings
 from detector_scenario_tool.codegen import save_generated_scenario_files
-from detector_scenario_tool.domain.log_roles import normalize_log_source
+from detector_scenario_tool.domain.log_roles import HOST_SOURCE, normalize_log_source
 from detector_scenario_tool.domain.logs import LogRecord
 from detector_scenario_tool.domain.scenario import (
     AckPolicy,
@@ -113,6 +113,8 @@ class MainWindow(QMainWindow):
         self._log_to_step_row: dict[int, int] = {}
         self._step_execution_details: dict[int, str] = {}
         self._log_execution_details: dict[int, str] = {}
+        #: Log rows matched to a step that came from an unexpected source; filled by the match pass.
+        self._log_source_problem_rows: set[int] = set()
         self._selection_sync_in_progress = False
 
         self._serial_controllers: list[SerialLogController] = []
@@ -470,6 +472,9 @@ class MainWindow(QMainWindow):
         self.run_panel.step_requested.connect(self._step_run)
         self.run_controller.error.connect(self._on_transport_error)
         self.run_controller.connection_changed.connect(self._on_connection_changed)
+        # Frames that arrive while no run is in progress. During a run the runner emits them
+        # instead, into the same handler.
+        self.run_controller.record_received.connect(self._on_run_record)
 
         self.language_ru_action.triggered.connect(lambda: self._set_ui_language("ru"))
         self.language_en_action.triggered.connect(lambda: self._set_ui_language("en"))
@@ -1440,21 +1445,17 @@ class MainWindow(QMainWindow):
     def _collect_log_problem_rows(
             self,
             log_records: list[LogRecord],
-            step_to_log: dict[int, int],
             log_to_step: dict[int, int],
-            step_details: dict[int, str],
     ) -> set[int]:
         result: set[int] = set()
 
-        for log_row in range(len(log_records)):
-            if log_row not in log_to_step:
+        for log_row, record in enumerate(log_records):
+            # A board log line is unmatched by definition; flagging it as a problem would drown
+            # the real ones.
+            if log_row not in log_to_step and not record.is_board_log:
                 result.add(log_row)
 
-        for step_row, detail in step_details.items():
-            if "source looks unusual" in detail:
-                matched_log_row = step_to_log.get(step_row)
-                if matched_log_row is not None:
-                    result.add(matched_log_row)
+        result |= self._log_source_problem_rows
 
         return result
 
@@ -1477,6 +1478,7 @@ class MainWindow(QMainWindow):
         log_details: dict[int, str] = {}
 
         used_indices: set[int] = set()
+        self._log_source_problem_rows = set()
         search_start = 0
         current_step_row: int | None = None
         first_mismatch_row: int | None = None
@@ -1545,7 +1547,10 @@ class MainWindow(QMainWindow):
                 expected_category = step.message.category
                 expected_category_label = category_short(expected_category)
                 expected_msg_id = step.message.msg_id
-                expected_sources = {"board", ""}
+                # Two things legitimately send a command: the board, when the capture came from
+                # its serial log, and this application, when the run went out over CAN from here.
+                # `host` was missing, so every live run flagged its own sends as suspicious.
+                expected_sources = {"board", HOST_SOURCE, ""}
 
             else:
                 if step.expected is None or step.expected.msg_id is None:
@@ -1570,7 +1575,9 @@ class MainWindow(QMainWindow):
             if match_index is None:
                 next_log = None
                 for i in range(search_start, len(log_records)):
-                    if i not in used_indices:
+                    # The board's own log output is not traffic the scenario predicted, so it can
+                    # neither be the mismatch that blocks a run nor the thing a step waited for.
+                    if i not in used_indices and not log_records[i].is_board_log:
                         next_log = (i, log_records[i])
                         break
 
@@ -1617,7 +1624,7 @@ class MainWindow(QMainWindow):
                 continue
 
             for i in range(search_start, match_index):
-                if i not in used_indices:
+                if i not in used_indices and not log_records[i].is_board_log:
                     extra = log_records[i]
                     log_details[i] = tr(
                         "execution.extra_before_step",
@@ -1677,6 +1684,9 @@ class MainWindow(QMainWindow):
                     )
             else:
                 row_statuses[row_index] = "warning"
+                # Remembered as a row number rather than recognised later from the sentence: the
+                # detail is translated, so the English-text check only ever fired in English.
+                self._log_source_problem_rows.add(match_index)
                 step_details[row_index] = tr(
                     "execution.source_unusual_step",
                     step=row_index + 1,
@@ -1694,16 +1704,27 @@ class MainWindow(QMainWindow):
 
         for i, rec in enumerate(log_records):
             rec_source = normalize_log_source(rec.source)
-            if i not in log_details:
+            if i in log_details:
+                continue
+
+            if rec.is_board_log:
                 log_details[i] = tr(
-                    "execution.unmatched_log",
+                    "execution.board_log",
                     log_row=i + 1,
-                    direction=tr(f"log.direction.{rec.direction}"),
-                    category=category_short(rec.category),
                     msg_id=rec.msg_id,
-                    source=rec_source or tr("log.source.empty"),
                     time=rec.timestamp_ms,
                 )
+                continue
+
+            log_details[i] = tr(
+                "execution.unmatched_log",
+                log_row=i + 1,
+                direction=tr(f"log.direction.{rec.direction}"),
+                category=category_short(rec.category),
+                msg_id=rec.msg_id,
+                source=rec_source or tr("log.source.empty"),
+                time=rec.timestamp_ms,
+            )
 
         return (
             row_statuses,
@@ -1749,6 +1770,11 @@ class MainWindow(QMainWindow):
             "neutral": 0,
             "pending": 1,
             "ok": 2,
+            # "Execution is here" ranks with "ok": a diagnostic on the current step still wins,
+            # because a warning the user has to act on matters more than the position marker,
+            # which the timeline and the summary line show as well. Leaving it out of this table
+            # was a KeyError waiting for a step that is current *and* flagged.
+            "current": 2,
             "warning": 3,
             "error": 4,
         }
@@ -1773,7 +1799,9 @@ class MainWindow(QMainWindow):
         matched_steps = len(step_to_log)
         unmatched_steps = total_steps - matched_steps
 
-        total_logs = len(self.log_records)
+        # Board log lines are not protocol traffic, so counting them here would report a run as
+        # full of unmatched messages purely because the МК was talkative.
+        total_logs = sum(1 for rec in self.log_records if not rec.is_board_log)
         matched_logs = len(log_to_step)
         unmatched_logs = total_logs - matched_logs
 
@@ -1831,12 +1859,7 @@ class MainWindow(QMainWindow):
         self.table_model.set_row_statuses(row_statuses)
         self.timeline_panel.set_document(self.document, row_statuses=row_statuses)
 
-        problem_rows = self._collect_log_problem_rows(
-            self.log_records,
-            step_to_log,
-            log_to_step,
-            step_details,
-        )
+        problem_rows = self._collect_log_problem_rows(self.log_records, log_to_step)
 
         self.log_panel.update_annotations(
             matched_rows=set(log_to_step.keys()),

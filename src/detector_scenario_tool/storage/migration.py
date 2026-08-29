@@ -21,6 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from detector_scenario_tool.protocol import legacy_v2
+
 CURRENT_SCHEMA_VERSION = 3
 
 #: Stamped into every saved document, so a file says which protocol revision it was authored
@@ -50,13 +52,6 @@ _STRING_ENUMS: dict[str, dict[str, int]] = {
 #: CMD_SET_CFG grew from 64 to 66 bytes in v2; the two new fields have no counterpart in v1 files.
 _SET_CFG_NEW_FIELDS = ("can_reply_address_source", "bvs_time_reaction")
 
-#: v2 identifier -> v2.1 identifier, per category. Every v2 message appears exactly once: a message
-#: that kept its number (0401h, 0A61h, 0A62h, F210h, F221h) is simply absent from the table.
-_V2_TO_V2_1: dict[str, dict[int, int]] = {
-    "KU": {old: old + 0x0F00 for old in range(0x0000, 0x000D)},
-    "KT": {0x0100: 0x0E00},
-    "TS": {0x0200: 0x0D00, 0x0201: 0x0D01, 0x0202: 0x0D02, 0x0203: 0x0D03},
-}
 
 #: v2 payload key -> v2.1 key, for the fields v2.1 split or renamed.
 _V2_FIELD_RENAMES: dict[str, str] = {
@@ -160,10 +155,7 @@ def _migrate_v2_to_v3(raw: dict) -> tuple[dict, list[MigrationNote]]:
 
 
 def _renumber_ref(ref: dict) -> bool:
-    table = _V2_TO_V2_1.get(ref.get("category", ""))
-    if table is None:
-        return False
-    new_id = table.get(ref.get("msg_id"))
+    new_id = legacy_v2.current_id(ref.get("category", ""), ref.get("msg_id"))
     if new_id is None:
         return False
     ref["msg_id"] = new_id

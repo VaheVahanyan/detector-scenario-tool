@@ -25,7 +25,14 @@ from detector_scenario_tool.services import can_interface
 from detector_scenario_tool.utils.labels import category_short
 from detector_scenario_tool.transport.backend import ConnectionSettings
 from detector_scenario_tool.transport.registry import available_backends, get_backend_info
-from detector_scenario_tool.transport_defaults import DEFAULT_BITRATE
+from detector_scenario_tool.transport.unican import MAX_STANDARD_ID, max_address
+from detector_scenario_tool.transport_defaults import (
+    DEFAULT_BITRATE,
+    DEFAULT_BOARD_LOG_ID,
+    DEFAULT_BVS_ADDRESS,
+    DEFAULT_NA_ADDRESS,
+)
+from detector_scenario_tool.ui.widgets.hex_spin_box import HexSpinBox
 
 BITRATES = ("1000000", "500000", "250000", "125000")
 
@@ -63,6 +70,25 @@ class RunPanel(QWidget):
 
         self.extended_checkbox = QCheckBox()
 
+        # Both addresses are «предварительно» in the specification, and a board on the bench may
+        # have been given others — without these there is no way to tell the application.
+        self.bvs_address_label = QLabel()
+        self.bvs_address_spin = HexSpinBox()
+        self.bvs_address_spin.setValue(DEFAULT_BVS_ADDRESS)
+
+        self.na_address_label = QLabel()
+        self.na_address_spin = HexSpinBox()
+        self.na_address_spin.setValue(DEFAULT_NA_ADDRESS)
+
+        self._apply_address_range()
+
+        # Not an address and not UniCAN: the identifier the firmware's debug log goes out on.
+        # A firmware constant, so it is configurable rather than assumed.
+        self.board_log_label = QLabel()
+        self.board_log_spin = HexSpinBox(digits=3)
+        self.board_log_spin.setRange(0, MAX_STANDARD_ID)
+        self.board_log_spin.setValue(DEFAULT_BOARD_LOG_ID)
+
         self.connect_button = QPushButton()
         self.disconnect_button = QPushButton()
 
@@ -95,6 +121,13 @@ class RunPanel(QWidget):
         connection_row.addWidget(self.bitrate_combo)
         connection_row.addWidget(self.configure_button)
         connection_row.addWidget(self.extended_checkbox)
+        # Source then destination, the direction our own frames travel.
+        connection_row.addWidget(self.bvs_address_label)
+        connection_row.addWidget(self.bvs_address_spin)
+        connection_row.addWidget(self.na_address_label)
+        connection_row.addWidget(self.na_address_spin)
+        connection_row.addWidget(self.board_log_label)
+        connection_row.addWidget(self.board_log_spin)
         connection_row.addWidget(self.connect_button)
         connection_row.addWidget(self.disconnect_button)
         connection_row.addStretch(1)
@@ -120,6 +153,8 @@ class RunPanel(QWidget):
         layout.addLayout(run_row)
 
         self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
+        # An address has to fit the identifier: 5 bits of it in an 11-bit frame, 14 in a 29-bit one.
+        self.extended_checkbox.toggled.connect(self._apply_address_range)
         self.configure_button.clicked.connect(self._configure_interface)
         self.connect_button.clicked.connect(self._emit_connect)
         self.disconnect_button.clicked.connect(self.disconnect_requested.emit)
@@ -142,6 +177,9 @@ class RunPanel(QWidget):
             channel=self.channel_edit.text().strip(),
             bitrate=int(self.bitrate_combo.currentText()),
             extended_ids=self.extended_checkbox.isChecked(),
+            na_address=self.na_address_spin.value(),
+            bvs_address=self.bvs_address_spin.value(),
+            board_log_id=self.board_log_spin.value(),
         )
 
     def apply_settings(self, settings: ConnectionSettings) -> None:
@@ -151,6 +189,17 @@ class RunPanel(QWidget):
         self.channel_edit.setText(settings.channel)
         self.bitrate_combo.setCurrentText(str(settings.bitrate))
         self.extended_checkbox.setChecked(settings.extended_ids)
+        # The range first: setting a 14-bit address while the box is still capped at 5 bits would
+        # silently clamp it.
+        self._apply_address_range()
+        self.na_address_spin.setValue(settings.na_address)
+        self.bvs_address_spin.setValue(settings.bvs_address)
+        self.board_log_spin.setValue(settings.board_log_id)
+
+    def _apply_address_range(self) -> None:
+        limit = max_address(self.extended_checkbox.isChecked())
+        for spin in (self.na_address_spin, self.bvs_address_spin):
+            spin.setRange(0, limit)
 
     def set_connected(self, connected: bool, simulated: bool = True) -> None:
         self.connect_button.setEnabled(not connected)
@@ -159,6 +208,9 @@ class RunPanel(QWidget):
         self.channel_edit.setEnabled(not connected)
         self.bitrate_combo.setEnabled(not connected)
         self.extended_checkbox.setEnabled(not connected)
+        self.na_address_spin.setEnabled(not connected)
+        self.bvs_address_spin.setEnabled(not connected)
+        self.board_log_spin.setEnabled(not connected)
         self.run_button.setEnabled(connected)
         self.step_button.setEnabled(connected)
 
@@ -264,6 +316,12 @@ class RunPanel(QWidget):
         self.channel_label.setText(tr("transport.channel"))
         self.bitrate_label.setText(tr("transport.bitrate"))
         self.extended_checkbox.setText(tr("transport.extended_ids"))
+        self.bvs_address_label.setText(tr("transport.bvs_address"))
+        self.bvs_address_spin.setToolTip(tr("transport.bvs_address.tooltip"))
+        self.na_address_label.setText(tr("transport.na_address"))
+        self.na_address_spin.setToolTip(tr("transport.na_address.tooltip"))
+        self.board_log_label.setText(tr("transport.board_log_id"))
+        self.board_log_spin.setToolTip(tr("transport.board_log_id.tooltip"))
         self.configure_button.setText(tr("transport.configure"))
         self.configure_button.setToolTip(tr("transport.configure.tooltip"))
         self.connect_button.setText(tr("transport.connect"))

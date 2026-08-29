@@ -170,12 +170,18 @@ class LogTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.BackgroundRole:
             if not item.valid:
                 return QBrush(QColor(95, 30, 30))
+            # The board's own output is expected to be unmatched — it answers nothing — so it must
+            # not be painted like a telemetry message that failed to line up with a step.
+            if item.is_board_log:
+                return QBrush(QColor(28, 34, 44))
             if row not in self._matched_rows:
                 return QBrush(QColor(80, 35, 35))
             if row in self._problem_rows:
                 return QBrush(QColor(85, 70, 30))
 
         if role == Qt.ItemDataRole.ForegroundRole:
+            if item.is_board_log:
+                return QBrush(QColor(150, 170, 190))
             if row not in self._matched_rows:
                 return QBrush(QColor(255, 220, 220))
             if row in self._problem_rows:

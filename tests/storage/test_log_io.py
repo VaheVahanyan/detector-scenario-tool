@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from detector_scenario_tool.domain.logs import LogRecord
+from detector_scenario_tool.domain.logs import LOG_CATEGORY, LogRecord
 from detector_scenario_tool.storage.log_io import (
     LOG_VERSION,
     LogLoadError,
@@ -98,3 +98,35 @@ class TestReading:
         assert len(records) == 2
         assert records[0].can_id is None
         assert records[1].can_id == 1
+
+
+class TestBoardLogLines:
+    """`cat=LOG` marks text the board printed onto the bus under an identifier of its own.
+
+    This is the one category that cannot be recovered from a catalogue afterwards, which is
+    exactly why the line has to carry it.
+    """
+
+    def test_round_trip(self):
+        record = _record(
+            category=LOG_CATEGORY, msg_id=0x0123, payload=b"NAND1 erase done\n",
+            direction="rx", source="board",
+        )
+        parsed = parse_log_line(format_log_record_line(record))
+
+        assert parsed.category == LOG_CATEGORY
+        assert parsed.is_board_log
+        assert parsed.payload == b"NAND1 erase done\n"
+
+    def test_the_category_is_written_out(self):
+        assert "|cat=LOG|" in format_log_record_line(_record(category=LOG_CATEGORY))
+
+    def test_a_bogus_category_is_still_refused(self):
+        line = format_log_record_line(_record()).replace("|cat=KU|", "|cat=ZZ|")
+        with pytest.raises(LogLoadError):
+            parse_log_line(line)
+
+    def test_an_old_line_without_a_category_cannot_invent_one(self):
+        """A v=1/v=2 capture predates board logging; an unknown id there is still an error."""
+        with pytest.raises(LogLoadError):
+            parse_log_line("DSTLOG|v=2|src=board|ts=1|dir=rx|id=0123|data=41")

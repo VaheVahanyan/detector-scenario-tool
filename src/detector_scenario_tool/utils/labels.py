@@ -12,25 +12,34 @@ user sees goes through here:
 | `TS` | ТС      | телеметрическое сообщение  | TM      | telemetry message  |
 
 The English forms are *not* KU/KT/TS: those are meaningless outside Russian.
+
+`LOG` is deliberately **not** one of `CATEGORY_CODES`: it is not a protocol category, so it must
+never be offered as one (a user-defined message cannot be a log, and the catalogue holds none).
+It only ever labels a captured `LogRecord`, so the log panel builds its filter from
+`LOG_RECORD_CATEGORY_CODES` instead.
 """
 
 from __future__ import annotations
 
+from detector_scenario_tool.domain.logs import LOG_CATEGORY
 from detector_scenario_tool.i18n import tr
 
 CATEGORY_CODES: tuple[str, ...] = ("KU", "KT", "TS")
 
+#: What a captured record's category may say — the protocol categories plus the board's own output.
+LOG_RECORD_CATEGORY_CODES: tuple[str, ...] = CATEGORY_CODES + (LOG_CATEGORY,)
+
 
 def category_short(code: str) -> str:
     """Abbreviation for tables, buttons and timeline labels: КУ / CC."""
-    if code not in CATEGORY_CODES:
+    if code not in LOG_RECORD_CATEGORY_CODES:
         return code
     return tr(f"category.{code}.short")
 
 
 def category_long(code: str) -> str:
     """Spelled-out name for tooltips and prose: команда управления / control command."""
-    if code not in CATEGORY_CODES:
+    if code not in LOG_RECORD_CATEGORY_CODES:
         return code
     return tr(f"category.{code}.long")
 

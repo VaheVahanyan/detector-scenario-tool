@@ -12,6 +12,7 @@ from detector_scenario_tool.i18n import set_language, tr
 from detector_scenario_tool.i18n.manager import _TRANSLATIONS
 from detector_scenario_tool.utils.labels import (
     CATEGORY_CODES,
+    LOG_RECORD_CATEGORY_CODES,
     category_long,
     category_short,
     message_label,
@@ -48,7 +49,17 @@ class TestCategoryLabels:
     def test_unknown_code_passes_through(self):
         assert category_short("XX") == "XX"
 
-    @pytest.mark.parametrize("code", CATEGORY_CODES)
+    def test_the_board_log_is_labelled_but_is_not_a_protocol_category(self):
+        """It labels captured records only: no message can be defined in it."""
+        assert "LOG" in LOG_RECORD_CATEGORY_CODES
+        assert "LOG" not in CATEGORY_CODES
+
+        set_language("ru")
+        assert category_short("LOG") == "Лог"
+        set_language("en")
+        assert category_short("LOG") == "Log"
+
+    @pytest.mark.parametrize("code", LOG_RECORD_CATEGORY_CODES)
     @pytest.mark.parametrize("language", ["ru", "en"])
     def test_every_category_has_both_forms(self, code, language):
         set_language(language)
@@ -101,7 +112,7 @@ class TestNoRawCodesInTranslations:
         for key, value in _TRANSLATIONS[language].items():
             if key.startswith("category."):
                 continue
-            for code in ("KU", "KT", "TS"):
+            for code in ("KU", "KT", "TS", "LOG"):
                 # Word-ish check: the code standing alone, not inside another word.
                 if f" {code} " in f" {value} " or value.strip() == code:
                     offenders.setdefault(key, []).append(code)

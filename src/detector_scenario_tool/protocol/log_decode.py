@@ -7,9 +7,15 @@ moment it is defined. Only the three messages whose meaning is not a flat field 
 
 from __future__ import annotations
 
-from detector_scenario_tool.domain.logs import LogRecord
+from detector_scenario_tool.domain.logs import (
+    LOG_CATEGORY,
+    LogRecord,
+    decode_log_text,
+    log_text_line,
+    looks_like_text,
+)
 from detector_scenario_tool.i18n import tr
-from detector_scenario_tool.protocol import registry, well_known
+from detector_scenario_tool.protocol import legacy_v2, registry, well_known
 from detector_scenario_tool.protocol.errors import (
     ALARM_BITS,
     STATUS_BITS,
@@ -25,8 +31,26 @@ from detector_scenario_tool.protocol.modes import decode_mode_byte
 SUMMARY_FIELD_LIMIT = 4
 
 
+def incoming_category(msg_id: int) -> str:
+    """What a message arriving from the bus is: a telemetry message, or the board's own log.
+
+    Only the catalogue can say. Until `Протокол_CAN_ГС_v2_1_Спутникс` an identifier's range gave
+    it away, but v2.1 scatters the catalogue across `0D00…0D03`, `0E00` and `FFE1`, and the МК
+    prints its debug output over the same bus under identifiers of its own choosing.
+
+    Anything the catalogue does not hold as a ТС is therefore *not an answer from the НА* — a
+    control command echoed back by another device included — and is captured as board log output
+    instead. Getting this wrong in the other direction is what matters: a stray printf must never
+    be able to satisfy a wait step.
+    """
+    return "TS" if registry.find("TS", msg_id) is not None else LOG_CATEGORY
+
+
 def build_log_summary(record: LogRecord) -> str:
     """One line for the log table."""
+    if record.category == LOG_CATEGORY:
+        return _summarise_board_log(record)
+
     spec = registry.find(record.category, record.msg_id)
     if spec is None:
         return tr("logdecode.unknown_message", length=len(record.payload))
@@ -45,6 +69,9 @@ def build_log_summary(record: LogRecord) -> str:
 
 def build_log_detail(record: LogRecord) -> str:
     """Multi-line field-by-field decode for the detail pane."""
+    if record.category == LOG_CATEGORY:
+        return _detail_board_log(record)
+
     spec = registry.find(record.category, record.msg_id)
     if spec is None:
         return tr("logdecode.unknown_message", length=len(record.payload))
@@ -64,6 +91,52 @@ def build_log_detail(record: LogRecord) -> str:
 
     lines.extend(_extra_detail(spec, values))
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------------------
+# The board's own output
+# --------------------------------------------------------------------------------------
+
+def _summarise_board_log(record: LogRecord) -> str:
+    moved = _legacy_label(record.msg_id)
+    if moved is not None:
+        # Not board output at all: firmware a revision behind, answering under its old numbers.
+        return tr("logdecode.legacy_v2", label=moved)
+
+    if looks_like_text(record.payload):
+        return log_text_line(record.payload)
+    # Not text after all — say so rather than printing mojibake. The hex is in its own column.
+    return tr("logdecode.board_log.binary", length=len(record.payload))
+
+
+def _detail_board_log(record: LogRecord) -> str:
+    moved = _legacy_label(record.msg_id)
+    if moved is not None:
+        return "\n".join([
+            tr("logdecode.legacy_v2", label=moved),
+            "",
+            tr("logdecode.legacy_v2.hint", msg=f"0x{record.msg_id:04X}"),
+            "",
+            record.payload_hex,
+        ])
+
+    lines = [tr("logdecode.board_log.title", msg=f"0x{record.msg_id:04X}"), ""]
+
+    if looks_like_text(record.payload):
+        lines.append(decode_log_text(record.payload))
+    else:
+        lines.append(tr("logdecode.board_log.binary", length=len(record.payload)))
+        lines.append(record.payload_hex)
+
+    return "\n".join(lines)
+
+
+def _legacy_label(msg_id: int) -> str | None:
+    """`ТС 0x0D01 Квитанция` for a number this message carried in v2, else None."""
+    from detector_scenario_tool.utils.labels import message_label
+
+    moved = legacy_v2.recognise(msg_id)
+    return None if moved is None else message_label(*moved)
 
 
 # --------------------------------------------------------------------------------------

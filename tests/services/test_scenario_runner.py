@@ -27,7 +27,9 @@ from detector_scenario_tool.services.scenario_runner import (
     ScenarioRunner,
     StepOutcome,
 )
+from detector_scenario_tool.domain.logs import LOG_CATEGORY
 from detector_scenario_tool.transport.simulator import DetectorSimulator
+from detector_scenario_tool.transport.unican import CanFrame, encode
 from detector_scenario_tool.transport.virtual import VirtualBackend
 from message_ids import OBSERVE_CTRL, OBSERVE_START, SET_CFG, SET_DEST_ID, SET_TIME_BVS, STATUS_REQ, TLM_MCILWAIN, TM_ACK, TM_STATUS, TM_TELEMETRY
 
@@ -408,3 +410,175 @@ class TestTelemetryCommands:
 
         assert runner.summary.outcomes[0] is StepOutcome.OK
         assert runner.state is RunState.FINISHED
+
+
+class TestBoardLogOutput:
+    """The МК also prints debug text onto the same bus in some configurations.
+
+    Those frames carry identifiers of the firmware's own choosing. They must be captured — that is
+    the point of watching the bus — but they answer nothing, so nothing about a run may depend on
+    whether the board happened to be talkative.
+    """
+
+    @staticmethod
+    def _log_frames(backend, text: bytes, msg_id: int = 0x0123):
+        return encode(
+            msg_id, text,
+            destination=backend.bvs_address,
+            source=backend.na_address,
+            extended=backend.settings.extended_ids,
+        )
+
+    def test_it_is_captured_as_a_log_record(self, backend, clock):
+        runner = ScenarioRunner(backend, _document(_wait_ts(TM_STATUS, "w1", timeout_ms=50)), clock=clock)
+        received = []
+        runner.message_received.connect(received.append)
+
+        runner.start()
+        backend.inject(self._log_frames(backend, b"boot\n"))
+        runner.tick()
+
+        assert [r.category for r in received] == [LOG_CATEGORY]
+        assert received[0].payload == b"boot\n"
+        assert received[0].source == "board"
+        # Recorded, then dropped: nothing keeps it around to be matched against later.
+        assert not runner._inbox
+
+    def test_it_does_not_satisfy_a_wait(self, backend, clock):
+        """The failure this prevents: a printf closing a step that never got its telemetry."""
+        runner = ScenarioRunner(backend, _document(_wait_ts(TM_STATUS, "w1", timeout_ms=100)), clock=clock)
+
+        runner.start()
+        backend.inject(self._log_frames(backend, b"NAND1 ok\n"))
+        runner.tick()
+
+        assert runner.state is RunState.RUNNING
+        assert runner.summary.outcomes == {}
+
+        clock.advance(200)
+        runner.tick()
+        assert runner.summary.outcomes[0] is StepOutcome.TIMEOUT
+
+    def test_it_does_not_answer_a_command_either(self, backend, clock, simulator):
+        simulator.silent_for = {STATUS_REQ}
+        document = _document(_send(STATUS_REQ, "s1", ack_timeout_ms=100))
+        runner = ScenarioRunner(backend, document, clock=clock)
+
+        runner.start()
+        runner.tick()
+        backend.inject(self._log_frames(backend, b"cmd seen\n"))
+        runner.tick()
+
+        assert runner.summary.outcomes == {}
+        clock.advance(200)
+        runner.tick()
+        assert runner.summary.outcomes[0] is StepOutcome.TIMEOUT
+
+    def test_chatter_does_not_push_telemetry_out_of_the_inbox(self, backend, clock):
+        """Board logs are dropped after being recorded, so the inbox keeps only real messages.
+
+        Telemetry that arrives before its wait step starts is buffered; if log lines were buffered
+        too, a talkative МК would evict the answer the next step is about to look for.
+        """
+        document = _document(_send(STATUS_REQ, "s1"), _wait_ts(TM_STATUS, "w1"))
+        runner = ScenarioRunner(backend, document, clock=clock)
+
+        runner.start()
+        runner.tick()                                     # sends, the simulator answers at once
+        for i in range(80):                               # more than INBOX_LIMIT
+            backend.inject(self._log_frames(backend, f"line {i}\n".encode()))
+        for _ in range(200):
+            if not runner.state.is_active:
+                break
+            runner.tick()
+
+        assert runner.state is RunState.FINISHED
+        assert runner.summary.outcomes == {0: StepOutcome.OK, 1: StepOutcome.OK}
+
+    def test_a_real_telemetry_message_is_still_an_answer(self, backend, clock):
+        """The guard rail: classification must not have made everything a log."""
+        document = _document(_send(STATUS_REQ, "s1"), _wait_ts(TM_STATUS, "w1"))
+        runner = ScenarioRunner(backend, document, clock=clock)
+
+        received = []
+        runner.message_received.connect(received.append)
+        _run(runner, clock)
+
+        assert runner.summary.outcomes == {0: StepOutcome.OK, 1: StepOutcome.OK}
+        assert {r.category for r in received} == {"TS"}
+
+
+class TestBoardLogFramesDuringARun:
+    """`BSP/UART/src/log_backend_can.c` — raw text on one fixed identifier, no UniCAN framing.
+
+    Read as UniCAN, `0x7DB` is a continuation frame from sender `0x1E`, which is the payload's own
+    address. During a run that is not merely noise: the bytes land inside whatever long telemetry
+    transfer is in flight.
+    """
+
+    @staticmethod
+    def _log(text: bytes) -> CanFrame:
+        return CanFrame(0x7DB, text)
+
+    def test_a_line_is_recorded_as_one_record(self, backend, clock):
+        runner = ScenarioRunner(backend, _document(_wait_ts(TM_STATUS, "w", timeout_ms=50)), clock=clock)
+        received = []
+        runner.message_received.connect(received.append)
+
+        runner.start()
+        backend.inject([self._log(b"NAND1 "), self._log(b"ok\r\n")])
+        runner.tick()
+
+        assert [r.payload for r in received] == [b"NAND1 ok\r\n"]
+        assert received[0].category == LOG_CATEGORY
+        assert received[0].frame_count == 2
+
+    def test_it_still_satisfies_nothing(self, backend, clock):
+        runner = ScenarioRunner(backend, _document(_wait_ts(TM_STATUS, "w", timeout_ms=100)), clock=clock)
+
+        runner.start()
+        backend.inject([self._log(b"ok\r\n")])
+        runner.tick()
+
+        assert runner.summary.outcomes == {}
+        clock.advance(200)
+        runner.tick()
+        assert runner.summary.outcomes[0] is StepOutcome.TIMEOUT
+
+    def test_it_does_not_break_the_telemetry_it_interrupts(self, backend, clock):
+        """A 109-byte ТС spans a start frame and thirteen data frames; the log lands in the middle."""
+        document = _document(_send(STATUS_REQ, "s1"), _wait_ts(TM_TELEMETRY, "w1"))
+        runner = ScenarioRunner(backend, document, clock=clock)
+        received = []
+        runner.message_received.connect(received.append)
+
+        runner.start()
+        frames = encode(
+            TM_TELEMETRY, bytes(109),
+            destination=backend.bvs_address, source=backend.na_address,
+        )
+        runner.tick()                                   # sends, the simulator acknowledges
+        backend.inject([frames[0], self._log(b"tick\r\n"), *frames[1:]])
+        for _ in range(50):
+            if not runner.state.is_active:
+                break
+            runner.tick()
+
+        assert runner.summary.outcomes == {0: StepOutcome.OK, 1: StepOutcome.OK}
+        assert all(r.valid for r in received)
+        assert b"tick\r\n" in [r.payload for r in received]
+
+    def test_the_identifier_comes_from_the_connection(self, clock):
+        from detector_scenario_tool.transport.backend import ConnectionSettings
+
+        other = VirtualBackend(ConnectionSettings(backend="virtual", board_log_id=0x321))
+        other.open()
+        runner = ScenarioRunner(other, _document(_wait_ts(TM_STATUS, "w", timeout_ms=50)), clock=clock)
+        received = []
+        runner.message_received.connect(received.append)
+
+        runner.start()
+        other.inject([CanFrame(0x321, b"hi\r\n")])
+        runner.tick()
+
+        assert [r.payload for r in received] == [b"hi\r\n"]

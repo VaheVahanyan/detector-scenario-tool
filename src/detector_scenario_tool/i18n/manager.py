@@ -20,6 +20,24 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "transport.channel": "Канал",
         "transport.bitrate": "Скорость",
         "transport.extended_ids": "Расширенные идентификаторы (29 бит)",
+        "transport.bvs_address": "БВС",
+        "transport.bvs_address.tooltip": (
+            "Наш адрес на шине: отправитель команд и получатель ответов НА. По протоколу 05h. "
+            "Команда «Задание адреса получателя» может изменить его по ходу прогона — здесь "
+            "задаётся значение, с которого прогон начинается."
+        ),
+        "transport.board_log_id": "Лог платы",
+        "transport.board_log_id.tooltip": (
+            "Идентификатор CAN, на котором плата печатает отладочный вывод (по умолчанию 7DBh). "
+            "Такие кадры — не UniCAN: в них нет ни адресов, ни MSG_ID, только текст, поэтому они "
+            "разбираются отдельно и собираются обратно в строки по переводу строки."
+        ),
+        "transport.na_address": "НА",
+        "transport.na_address.tooltip": (
+            "Адрес научной аппаратуры: получатель наших команд и отправитель телеметрии. "
+            "В протоколе он указан как предварительный (1Eh). Команда «Задание адреса "
+            "устройства» может изменить его по ходу прогона."
+        ),
         "transport.configure": "Настроить интерфейс",
         "transport.configure.tooltip": "SocketCAN берёт скорость из настроек ядра, а не из приложения. Кнопка поднимает интерфейс с указанной скоростью; для этого нужны права администратора.",
         "transport.configure.confirm": "Настройка интерфейса CAN требует прав администратора.\n\nБудет выполнено:\n{command}\n\nПосле нажатия «OK» система запросит пароль администратора. Приложение пароль не видит и не сохраняет.\n\nБольше ничего с правами администратора не выполняется: обмен по шине идёт от обычного пользователя.",
@@ -133,6 +151,8 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "category.KT.long": "команда телеметрии",
         "category.TS.short": "ТС",
         "category.TS.long": "телеметрическое сообщение",
+        "category.LOG.short": "Лог",
+        "category.LOG.long": "отладочный вывод платы",
         "label.no_message": "сообщение не выбрано",
 
         "action.add_ku": "Добавить {category}",
@@ -298,6 +318,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "execution.first_mismatch": "Первое расхождение на шаге #{step}: ожидалось {direction} {category} 0x{msg_id:04X}, но следующий несопоставленный лог #{log_row}: {got_direction} {got_category} 0x{got_msg_id:04X} от {source} в {time} мс.",
         "execution.extra_before_step": "Лишний лог перед шагом #{step}: лог #{log_row} = {direction} {category} 0x{msg_id:04X} от {source} в {time} мс.",
         "execution.unmatched_log": "Лог #{log_row} лишний: {direction} {category} 0x{msg_id:04X}, источник={source}, время={time} мс.",
+        "execution.board_log": "Лог #{log_row}: отладочный вывод платы (идентификатор 0x{msg_id:04X}, {time} мс). Это не ответ НА — в сопоставлении со сценарием не участвует.",
 
         "log.direction.tx": "TX",
         "log.direction.rx": "RX",
@@ -560,6 +581,24 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "transport.channel": "Channel",
         "transport.bitrate": "Bitrate",
         "transport.extended_ids": "Extended identifiers (29-bit)",
+        "transport.bvs_address": "OBC",
+        "transport.bvs_address.tooltip": (
+            "Our own address on the bus: sender of the commands and recipient of the payload's "
+            "answers. 05h per the protocol. A «set recipient address» command can move it during "
+            "a run; this is the value the run starts from."
+        ),
+        "transport.board_log_id": "Board log",
+        "transport.board_log_id.tooltip": (
+            "The CAN identifier the board prints its debug output on (7DBh by default). Those "
+            "frames are not UniCAN: they carry no addresses and no MSG_ID, only text, so they are "
+            "taken out of the stream separately and joined back into lines on the newline."
+        ),
+        "transport.na_address": "Payload",
+        "transport.na_address.tooltip": (
+            "Address of the payload: recipient of our commands and sender of the telemetry. The "
+            "protocol marks it provisional (1Eh). A «set device address» command can move it "
+            "during a run."
+        ),
         "transport.configure": "Configure the interface",
         "transport.configure.tooltip": "SocketCAN takes its bitrate from the kernel, not from the application. This button brings the interface up at the chosen bitrate, which needs administrator rights.",
         "transport.configure.confirm": "Configuring a CAN interface needs administrator rights.\n\nThe following will run:\n{command}\n\nAfter you press OK the system will ask for your administrator password. The application never sees or stores it.\n\nNothing else runs with elevated rights: the bus traffic itself goes through an ordinary user.",
@@ -674,6 +713,8 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "category.KT.long": "telemetry command",
         "category.TS.short": "TM",
         "category.TS.long": "telemetry message",
+        "category.LOG.short": "Log",
+        "category.LOG.long": "board debug output",
         "label.no_message": "no message selected",
 
         "action.add_ku": "Add {category}",
@@ -838,6 +879,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "execution.first_mismatch": "First mismatch at step #{step}: expected {direction} {category} 0x{msg_id:04X}, but next unmatched log row #{log_row} is {got_direction} {got_category} 0x{got_msg_id:04X} from {source} at {time} ms.",
         "execution.extra_before_step": "Unexpected extra log before step #{step}: log row #{log_row} = {direction} {category} 0x{msg_id:04X} from {source} at {time} ms.",
         "execution.unmatched_log": "Log row #{log_row} is unmatched: {direction} {category} 0x{msg_id:04X}, source={source}, time={time} ms.",
+        "execution.board_log": "Log row #{log_row}: board debug output (identifier 0x{msg_id:04X}, {time} ms). Not an answer from the payload — it takes no part in matching.",
 
         "log.direction.tx": "TX",
         "log.direction.rx": "RX",

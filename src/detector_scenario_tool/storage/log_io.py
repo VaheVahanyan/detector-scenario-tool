@@ -3,12 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from detector_scenario_tool.domain.logs import LogRecord
+from detector_scenario_tool.domain.logs import LOG_CATEGORY, LogRecord
 
 
 #: Written by this version; older files are still accepted.
 LOG_VERSION = "3"
 SUPPORTED_LOG_VERSIONS = ("1", "2", "3")
+
+#: What `cat=` may say. The three protocol categories, plus the board's own log output, which
+#: is not a protocol message at all (see `domain/logs.LOG_CATEGORY`).
+LOG_CATEGORIES = ("KU", "KT", "TS", LOG_CATEGORY)
 
 
 class LogLoadError(ValueError):
@@ -129,8 +133,10 @@ def _load_json_records(text: str) -> list[LogRecord]:
         if direction not in ("tx", "rx"):
             raise LogLoadError(f"Record #{i}: direction must be 'tx' or 'rx'.")
 
-        if category not in ("KU", "KT", "TS"):
-            raise LogLoadError(f"Record #{i}: category must be KU, KT, or TS.")
+        if category not in LOG_CATEGORIES:
+            raise LogLoadError(
+                f"Record #{i}: category must be one of {', '.join(LOG_CATEGORIES)}."
+            )
 
         payload = _read_payload(item, i)
 
@@ -156,11 +162,18 @@ def _read_category(fields: dict[str, str], msg_id: int, line_no: int) -> str:
     `Протокол_CAN_ГС_v2_1_Спутникс` they were (`0000…00FF` КУ, `0100…01FF` КТ, `0200…02FF` ТС) and
     this function guessed from the range; v2.1 scatters КУ across `0F00…0F0C`, `0401`, `0A61`,
     `0A62` and `FFE0`, so there is nothing left to guess from.
+
+    `cat=LOG` is the one value that cannot be worked out from a catalogue at all: it marks text the
+    board printed onto the bus under an identifier of its own, which is exactly why it has to be
+    written down at capture time.
     """
     stated = fields.get("cat", "").strip().upper()
     if stated:
-        if stated not in ("KU", "KT", "TS"):
-            raise LogLoadError(f"Line {line_no}: cat must be KU, KT or TS, not '{stated}'.")
+        if stated not in LOG_CATEGORIES:
+            raise LogLoadError(
+                f"Line {line_no}: cat must be one of {', '.join(LOG_CATEGORIES)}, "
+                f"not '{stated}'."
+            )
         return stated
 
     return _category_from_catalogue(msg_id, line_no)

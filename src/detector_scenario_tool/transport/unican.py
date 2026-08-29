@@ -48,6 +48,10 @@ EXTENDED_ADDRESS_BITS = 14
 
 MAX_DLC = 8
 
+#: The widest identifier a CAN 2.0A frame can carry. Not a UniCAN limit — it bounds any field that
+#: names a raw identifier, such as the one the board's debug log uses.
+MAX_STANDARD_ID = 0x7FF
+
 #: The document says "CRC16 X-modem" but not the byte order of the two trailing bytes. Everything
 #: else in this protocol family is little-endian, so that is the assumption; if a capture shows
 #: otherwise this is the single line to change.

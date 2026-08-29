@@ -221,3 +221,53 @@ class TestSettingsPersistence:
 
         assert app_settings.load() == {}
         assert app_settings.load_connection_settings().backend == "virtual"
+
+
+class TestOwnSendsAreNotSuspicious:
+    """A live run records its own commands with source `host`.
+
+    The correlation expected `board` — the name a command carries when the capture came from the
+    board's serial log — so every run flagged its own sends as coming from a suspicious source.
+    """
+
+    def test_a_sent_command_matches_cleanly(self, window):
+        _add_send(window, STATUS_REQ)
+        _connect(window)
+        window._start_run()
+        _run_to_completion(window)
+        window._refresh_all_views()
+
+        statuses, step_to_log, _, _, _, _, _ = window._build_log_match_info(window.log_records)
+
+        # "ok" is the branch that did not complain about the source; "warning" is the one that did.
+        assert statuses.get(0) == "ok"
+        assert step_to_log.get(0) == 0
+        assert window._log_source_problem_rows == set()
+
+    def test_the_matched_row_is_not_a_problem_row(self, window):
+        _add_send(window, STATUS_REQ)
+        _connect(window)
+        window._start_run()
+        _run_to_completion(window)
+        window._refresh_all_views()
+
+        assert window._step_to_log_row.get(0) not in window._collect_log_problem_rows(
+            window.log_records, window._log_to_step_row
+        )
+
+    def test_a_genuinely_odd_source_is_still_flagged(self, window):
+        """The guard rail: widening the set must not empty it."""
+        from detector_scenario_tool.domain.logs import LogRecord
+
+        _add_send(window, STATUS_REQ)
+        window.log_records = [
+            LogRecord(
+                timestamp_ms=1, direction="tx", category="KU", msg_id=STATUS_REQ,
+                payload=b"", source="l496",
+            )
+        ]
+        window._refresh_all_views()
+
+        statuses, _, _, _, _, _, _ = window._build_log_match_info(window.log_records)
+        assert statuses.get(0) == "warning"
+        assert window._log_source_problem_rows == {0}
