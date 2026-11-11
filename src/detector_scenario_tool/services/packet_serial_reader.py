@@ -27,7 +27,9 @@ POLL_INTERVAL_MS = 5
 MAX_READ = 1 << 16
 
 DEFAULT_PORT = "/dev/ttyUSB0"
-DEFAULT_BAUDRATE = 921_600
+#: `FTDI_BAUDRATE` in the firmware's `BSP/UART/src/ftdi.c` (an FT232RL runs 1, 1.5, 2 or 3 Mbaud
+#: above 1 Mbaud; 3 Mbaud is what the board ships with and was measured at ~295 kB/s in DUMP).
+DEFAULT_BAUDRATE = 3_000_000
 
 
 class PacketSerialReader(QObject):

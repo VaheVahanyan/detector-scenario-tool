@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QStackedWidget,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -22,12 +24,21 @@ from detector_scenario_tool.domain.logs import LogRecord
 from detector_scenario_tool.i18n import tr
 from detector_scenario_tool.protocol.catalog import ProtocolCatalog
 from detector_scenario_tool.ui.delegates.row_outline_delegate import RowOutlineDelegate
-from detector_scenario_tool.protocol.log_decode import build_log_detail
+from detector_scenario_tool.protocol.log_decode import build_log_text_line
 from detector_scenario_tool.ui.models.log_table_model import (
     VIEW_DECODED,
     VIEW_RAW,
+    VIEW_TEXT,
     LogTableModel,
 )
+
+#: Offered in the port's speed box; it is editable, so anything else can be typed in.
+#: 115200 / 921600 — LPUART1 on the NUCLEO stand; 1, 2 and 3 Mbaud — the FTDI bridge
+#: (`FTDI_BAUDRATE` in `BSP/UART/src/ftdi.c`, 3 Mbaud by default).
+SERIAL_BAUD_RATES = (
+    "115200", "230400", "460800", "921600", "1000000", "1500000", "2000000", "3000000",
+)
+DEFAULT_SERIAL_BAUD = "115200"
 
 
 class LogPanel(QWidget):
@@ -114,8 +125,9 @@ class LogPanel(QWidget):
 
         self.port_edit = QLineEdit("/dev/ttyACM0")
         self.baud_combo = QComboBox()
-        self.baud_combo.addItems(["115200", "230400", "460800", "921600"])
-        self.baud_combo.setCurrentText("115200")
+        self.baud_combo.setEditable(True)
+        self.baud_combo.addItems(list(SERIAL_BAUD_RATES))
+        self.baud_combo.setCurrentText(DEFAULT_SERIAL_BAUD)
 
         self.start_live_button = QPushButton()
         self.stop_live_button = QPushButton()
@@ -139,10 +151,20 @@ class LogPanel(QWidget):
         self.view_mode_combo = QComboBox()
         self.view_mode_combo.addItem("", VIEW_DECODED)
         self.view_mode_combo.addItem("", VIEW_RAW)
+        self.view_mode_combo.addItem("", VIEW_TEXT)
 
-        self.detail_view = QPlainTextEdit()
-        self.detail_view.setReadOnly(True)
-        self.detail_view.setFixedHeight(120)
+        # The whole log as running text. The field-by-field decode that used to sit in a fixed
+        # pane under the table is the table's tooltip now.
+        self.text_view = QPlainTextEdit()
+        self.text_view.setReadOnly(True)
+        self.text_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.text_view.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        #: The records currently shown in `text_view`, so new ones can be appended, not redrawn.
+        self._text_records: list[LogRecord] = []
+
+        self.views = QStackedWidget()
+        self.views.addWidget(self.table)
+        self.views.addWidget(self.text_view)
 
         self.live_status_label = QLabel()
         self.summary_label = QLabel()
@@ -195,8 +217,7 @@ class LogPanel(QWidget):
         layout.addLayout(save_controls)
         layout.addWidget(self.live_status_label)
         layout.addLayout(filters)
-        layout.addWidget(self.table)
-        layout.addWidget(self.detail_view)
+        layout.addWidget(self.views, 1)
         layout.addWidget(self.summary_label)
 
         self.import_button.clicked.connect(self.import_requested.emit)
@@ -215,7 +236,6 @@ class LogPanel(QWidget):
         self.problems_only_checkbox.toggled.connect(self._apply_filters)
         self.reset_filters_button.clicked.connect(self._reset_filters)
         self.view_mode_combo.currentIndexChanged.connect(self._on_view_mode_changed)
-        self.table.selectionModel().selectionChanged.connect(self._update_detail)
 
         self.retranslate_ui()
 
@@ -281,11 +301,28 @@ class LogPanel(QWidget):
             self.view_mode_combo.setItemText(index, tr(f"logs.view_mode.{mode}"))
         self.view_mode_combo.blockSignals(False)
 
-        self._update_detail()
+        # Every line carries translated names and summaries.
+        self._text_records = []
+        self._render_text()
+
+    @property
+    def view_mode(self) -> str:
+        return self.view_mode_combo.currentData()
+
+    def set_view_mode(self, mode: str) -> None:
+        index = self.view_mode_combo.findData(mode)
+        if index >= 0:
+            self.view_mode_combo.setCurrentIndex(index)
 
     def _on_view_mode_changed(self) -> None:
-        self.model.set_view_mode(self.view_mode_combo.currentData())
-        self._configure_columns()
+        mode = self.view_mode
+        self.model.set_view_mode(mode)
+        if mode == VIEW_TEXT:
+            self.views.setCurrentWidget(self.text_view)
+            self._render_text()
+        else:
+            self.views.setCurrentWidget(self.table)
+            self._configure_columns()
 
     def _configure_columns(self) -> None:
         header = self.table.horizontalHeader()
@@ -298,22 +335,40 @@ class LogPanel(QWidget):
             )
             header.setSectionResizeMode(column, mode)
 
-    def _update_detail(self) -> None:
-        row = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
-        if not row:
-            self.detail_view.setPlainText(tr("logs.detail.placeholder"))
+    def text_view_text(self) -> str:
+        return self.text_view.toPlainText()
+
+    def _render_text(self) -> None:
+        """Bring the text view up to date with the filtered records.
+
+        Live capture refreshes every 50 ms with the whole record list, so redrawing thousands of
+        lines each time is not an option: when the visible records only grew, the new ones are
+        appended. Anything else — a filter change, a cleared log — redraws.
+        """
+        if self.view_mode != VIEW_TEXT:
             return
 
-        record = self.model.record_at(row[0].row())
-        if record is None:
-            self.detail_view.setPlainText(tr("logs.detail.placeholder"))
-            return
+        records = self.model.records()
+        shown = self._text_records
+        grew = (
+            shown
+            and len(records) >= len(shown)
+            and records[0] is shown[0]
+            and records[len(shown) - 1] is shown[-1]
+        )
 
-        if not record.valid:
-            self.detail_view.setPlainText(record.note or tr("logs.value.broken"))
-            return
+        if grew:
+            fresh = records[len(shown):]
+            if fresh:
+                self.text_view.appendPlainText("\n".join(build_log_text_line(r) for r in fresh))
+        else:
+            self.text_view.setPlainText("\n".join(build_log_text_line(r) for r in records))
 
-        self.detail_view.setPlainText(build_log_detail(record))
+        self._text_records = list(records)
+
+        if self.is_auto_scroll_enabled():
+            bar = self.text_view.verticalScrollBar()
+            bar.setValue(bar.maximum())
 
     def set_records(self, records: list[LogRecord]) -> None:
         self._all_records = list(records)
@@ -412,9 +467,12 @@ class LogPanel(QWidget):
         self.table.scrollTo(self.model.index(filtered_row, 0))
 
     def _emit_start_live(self) -> None:
-        self.start_live_requested.emit(
-            self.port_edit.text().strip(), int(self.baud_combo.currentText())
-        )
+        try:
+            baud = int(self.baud_combo.currentText().strip())
+        except ValueError:
+            baud = int(DEFAULT_SERIAL_BAUD)
+            self.baud_combo.setCurrentText(DEFAULT_SERIAL_BAUD)
+        self.start_live_requested.emit(self.port_edit.text().strip(), baud)
 
     def _browse_session_file(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -474,7 +532,9 @@ class LogPanel(QWidget):
             if source_value != tr("logs.filter.source.all") and record_source != source_value:
                 continue
 
-            if problems_only and i not in self._problem_rows_all and i in self._matched_rows_all:
+            # Problems are broken frames, rejections and odd sources — not merely "outside the
+            # scenario", which on a real bench is most of the traffic.
+            if problems_only and i not in self._problem_rows_all and record.valid:
                 continue
 
             filtered_records.append(record)
@@ -486,3 +546,4 @@ class LogPanel(QWidget):
         self.model.set_items(filtered_records)
         self._push_annotations()
         self.table.resizeRowsToContents()
+        self._render_text()

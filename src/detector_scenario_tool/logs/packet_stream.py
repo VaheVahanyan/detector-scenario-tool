@@ -21,6 +21,7 @@ with ERR_CONTENT), so this reads a byte stream rather than the command bus.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from detector_scenario_tool.protocol.crc16 import compute_ni_crc, is_configured
 
@@ -110,10 +111,18 @@ class PacketStream:
     Holds at most one packet's worth of unmatched bytes, so a long capture does not accumulate.
     """
 
-    def __init__(self, store_packets: bool = False) -> None:
+    def __init__(
+            self,
+            store_packets: bool = False,
+            on_interstitial: Callable[[bytes], None] | None = None,
+    ) -> None:
         self.stats = PacketStats()
         self.store_packets = store_packets
         self.packets: list[Packet] = []
+        #: Receives, in order, the bytes found *between* packets. With the FTDI log backend the
+        #: board's text shares the port with the science data, and this is where it ends up.
+        #: Bytes of a truncated packet are not passed on: they are data, just damaged.
+        self.on_interstitial = on_interstitial
 
         self._buffer = bytearray()
         self._consumed = 0
@@ -136,20 +145,17 @@ class PacketStream:
         while True:
             start = self._buffer.find(MARKER_BYTES)
             if start < 0:
-                # Keep only what could still be the beginning of a marker.
-                keep = len(MARKER_BYTES) - 1
+                # Keep only what could still be the beginning of a marker — and only if it
+                # actually could: holding back a fixed tail would sit on the end of a text line.
+                keep = _marker_prefix_length(self._buffer)
                 if len(self._buffer) > keep:
                     discarded = len(self._buffer) - keep
-                    self.stats.bytes_discarded += discarded
-                    self._consumed += discarded
-                    del self._buffer[:discarded]
+                    self._discard(discarded)
                 break
 
             if start > 0:
-                self.stats.bytes_discarded += start
                 self.stats.resyncs += 1
-                self._consumed += start
-                del self._buffer[:start]
+                self._discard(start)
 
             # Where the next packet begins decides how long this one really is. Consuming a
             # blind 2048 bytes would swallow the next marker whenever a byte went missing, and
@@ -180,6 +186,13 @@ class PacketStream:
         return found
 
     # -- internals ---------------------------------------------------------------------
+
+    def _discard(self, count: int) -> None:
+        if self.on_interstitial is not None:
+            self.on_interstitial(bytes(self._buffer[:count]))
+        self.stats.bytes_discarded += count
+        self._consumed += count
+        del self._buffer[:count]
 
     @staticmethod
     def _parse(raw: bytes, offset: int) -> Packet:
@@ -221,6 +234,14 @@ class PacketStream:
 
         if self.store_packets:
             self.packets.append(packet)
+
+
+def _marker_prefix_length(buffer: bytes | bytearray) -> int:
+    """How many trailing bytes of `buffer` could be the start of the marker triple."""
+    for length in range(min(len(MARKER_BYTES) - 1, len(buffer)), 0, -1):
+        if buffer.endswith(MARKER_BYTES[:length]):
+            return length
+    return 0
 
 
 def build_packet(

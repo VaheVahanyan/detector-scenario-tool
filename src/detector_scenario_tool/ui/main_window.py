@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
 
 from detector_scenario_tool.app import settings as app_settings
 from detector_scenario_tool.codegen import save_generated_scenario_files
-from detector_scenario_tool.domain.log_roles import HOST_SOURCE, normalize_log_source
 from detector_scenario_tool.domain.logs import LogRecord
 from detector_scenario_tool.domain.scenario import (
     AckPolicy,
@@ -44,6 +43,7 @@ from detector_scenario_tool.protocol import registry, well_known
 from detector_scenario_tool.protocol.catalog import ProtocolCatalog
 from detector_scenario_tool.protocol.fields import unpack_message
 from detector_scenario_tool.protocol.expected_responses import get_expected_responses
+from detector_scenario_tool.services.log_correlation import Correlation, correlate
 from detector_scenario_tool.services.serial_log_controller import SerialLogController
 from detector_scenario_tool.storage.log_io import load_log_records, format_log_record_line
 from detector_scenario_tool.storage.packed_export import save_packed_scenario_export
@@ -115,13 +115,20 @@ class MainWindow(QMainWindow):
         self._log_execution_details: dict[int, str] = {}
         #: Log rows matched to a step that came from an unexpected source; filled by the match pass.
         self._log_source_problem_rows: set[int] = set()
+        self._correlation: Correlation | None = None
         self._selection_sync_in_progress = False
 
         self._serial_controllers: list[SerialLogController] = []
         self._live_refresh_pending = False
         self._step_refresh_pending = False
         self._live_run_confirmed = False
+        #: What the runner itself concluded about each step. While a run has produced any, it is
+        #: the truth about the scenario table: the runner saw every frame with its own clock and
+        #: its own acknowledgement binding, and re-deriving its verdict from the log can only be
+        #: worse. Cleared by a new run, a cleared or imported log, and a new document.
         self._run_statuses: dict[int, str] = {}
+        self._run_details: dict[int, str] = {}
+        self._analyzer_statuses: dict[int, str] = {}
         self._live_session_save_enabled = False
         self._live_session_save_path = ""
         self._live_session_file = None
@@ -433,6 +440,8 @@ class MainWindow(QMainWindow):
         self.custom_messages_action.triggered.connect(self._edit_custom_messages)
         self.log_panel.import_requested.connect(self._import_logs)
         self.log_panel.clear_requested.connect(self._clear_logs)
+        # FTDI log backend: the board's text shares the port with the science packets.
+        self.packets_panel.log_records_found.connect(self._append_live_log_records)
         self.log_panel.start_live_requested.connect(self._start_live_logs)
         self.log_panel.stop_live_requested.connect(self._stop_live_logs)
         self.log_panel.pause_live_requested.connect(self._pause_live_logs)
@@ -488,6 +497,7 @@ class MainWindow(QMainWindow):
         )
         self.current_path = None
         self.log_records = []
+        self._forget_run_results()
         self._sync_custom_messages()
         self.inspector_panel.reload_message_catalog()
         self.log_panel.set_records(self.log_records)
@@ -775,16 +785,24 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self.log_records = load_log_records(path_str)
+            # Everything in the file is kept: lines that are not `DSTLOG` are the board's own
+            # output, and a line the catalogue cannot place is shown rather than failing the import.
+            self.log_records = load_log_records(path_str, keep_text=True)
         except Exception as exc:
             QMessageBox.critical(self, tr("dialog.import_logs_failed_title"), str(exc))
             return
 
+        self._forget_run_results()
         self._refresh_all_views()
 
     def _clear_logs(self) -> None:
         self.log_records = []
+        self._forget_run_results()
         self._refresh_all_views()
+
+    def _forget_run_results(self) -> None:
+        self._run_statuses = {}
+        self._run_details = {}
 
     def _start_live_logs(self, port: str, baud: int) -> None:
         self._stop_live_logs()
@@ -918,6 +936,10 @@ class MainWindow(QMainWindow):
                     self._close_live_session_file()
 
         self._schedule_live_refresh()
+
+    def _append_live_log_records(self, records: list[LogRecord]) -> None:
+        for record in records:
+            self._append_live_log_record(record)
 
     def _schedule_live_refresh(self) -> None:
         if self._live_refresh_pending:
@@ -1159,6 +1181,8 @@ class MainWindow(QMainWindow):
             return
 
         step_row = self._log_to_step_row.get(log_row)
+        if step_row is None and self._correlation is not None:
+            step_row = self._correlation.related_rows.get(log_row)
         if step_row is None:
             return
 
@@ -1244,7 +1268,7 @@ class MainWindow(QMainWindow):
             return None
 
         self.runner = runner
-        self._run_statuses = {}
+        self._forget_run_results()
         runner.message_sent.connect(self._on_run_record)
         runner.message_received.connect(self._on_run_record)
         runner.step_started.connect(self._on_run_step_started)
@@ -1305,12 +1329,21 @@ class MainWindow(QMainWindow):
             "error": "error",
         }.get(outcome, "warning")
         if detail:
-            self._step_execution_details[row] = detail
+            self._run_details[row] = detail
         self._apply_run_statuses()
 
+    def _run_row_statuses(self) -> dict[int, str]:
+        """A step the run reached shows what the run concluded; the rest show the analyzer.
+
+        The analyzer's warnings stay in the warnings panel — a step that was answered and accepted
+        on the bench is green, even if it would be better written with an explicit wait step.
+        """
+        return {**self._analyzer_statuses, **self._run_statuses}
+
     def _apply_run_statuses(self) -> None:
-        self.table_model.set_row_statuses(self._run_statuses)
-        self.timeline_panel.set_document(self.document, row_statuses=self._run_statuses)
+        statuses = self._run_row_statuses()
+        self.table_model.set_row_statuses(statuses)
+        self.timeline_panel.set_document(self.document, row_statuses=statuses)
 
     def _on_bus_error(self, error) -> None:
         msg_id = getattr(error, "failed_msg_id", None) or getattr(error, "msg_id", None)
@@ -1408,56 +1441,22 @@ class MainWindow(QMainWindow):
         return result
 
     def _is_live_running(self) -> bool:
-        return bool(self._serial_controllers)
-
-    def _is_actionable_step(self, step) -> bool:
-        return isinstance(step, (SendMessageStep, WaitForTsStep))
-
-    def _find_first_actionable_step_row(self) -> int | None:
-        for row_index, step in enumerate(self.document.steps):
-            if self._is_actionable_step(step):
-                return row_index
-        return None
-
-    def _mark_pending_after(
-            self,
-            row_statuses: dict[int, str],
-            step_details: dict[int, str],
-            start_row: int,
-    ) -> None:
-        for row_index in range(start_row, len(self.document.steps)):
-            step = self.document.steps[row_index]
-            if not self._is_actionable_step(step):
-                if isinstance(step, WaitTimeStep) and row_index not in step_details:
-                    step_details[row_index] = tr(
-                        "execution.wait_not_matched",
-                        step=row_index + 1,
-                    )
-                continue
-
-            if row_index not in row_statuses:
-                row_statuses[row_index] = "pending"
-                step_details[row_index] = tr(
-                    "execution.pending_not_reached",
-                    step=row_index + 1,
-                )
+        """Records may still be arriving: a serial capture is open, or the CAN bus is."""
+        return bool(self._serial_controllers) or self.run_controller.is_connected
 
     def _collect_log_problem_rows(
             self,
             log_records: list[LogRecord],
             log_to_step: dict[int, int],
     ) -> set[int]:
-        result: set[int] = set()
+        """Rows worth a second look — broken frames, rejections, suspicious sources.
 
-        for log_row, record in enumerate(log_records):
-            # A board log line is unmatched by definition; flagging it as a problem would drown
-            # the real ones.
-            if log_row not in log_to_step and not record.is_board_log:
-                result.add(log_row)
-
-        result |= self._log_source_problem_rows
-
-        return result
+        A record the scenario simply did not mention is *not* one of them: on a real bench that is
+        every acknowledgement and status without a wait step, every repeat and all telemetry.
+        """
+        if self._correlation is not None:
+            return set(self._correlation.problem_rows)
+        return {i for i, record in enumerate(log_records) if not record.valid}
 
     def _build_log_match_info(
             self,
@@ -1471,295 +1470,10 @@ class MainWindow(QMainWindow):
         int | None,
         int | None,
     ]:
-        row_statuses: dict[int, str] = {}
-        step_to_log: dict[int, int] = {}
-        log_to_step: dict[int, int] = {}
-        step_details: dict[int, str] = {}
-        log_details: dict[int, str] = {}
-
-        used_indices: set[int] = set()
-        self._log_source_problem_rows = set()
-        search_start = 0
-        current_step_row: int | None = None
-        first_mismatch_row: int | None = None
-        execution_blocked = False
-
-        if not log_records:
-            first_actionable = self._find_first_actionable_step_row()
-            if first_actionable is not None and self._is_live_running():
-                row_statuses[first_actionable] = "current"
-                step_details[first_actionable] = tr(
-                    "execution.current_first_live",
-                    step=first_actionable + 1,
-                )
-                self._mark_pending_after(row_statuses, step_details, first_actionable + 1)
-                return (
-                    row_statuses,
-                    step_to_log,
-                    log_to_step,
-                    step_details,
-                    log_details,
-                    first_actionable,
-                    None,
-                )
-
-            return (
-                row_statuses,
-                step_to_log,
-                log_to_step,
-                step_details,
-                log_details,
-                current_step_row,
-                first_mismatch_row,
-            )
-
-        for row_index, step in enumerate(self.document.steps):
-            if not self._is_actionable_step(step):
-                if isinstance(step, WaitTimeStep):
-                    step_details[row_index] = tr(
-                        "execution.wait_not_matched",
-                        step=row_index + 1,
-                    )
-                continue
-
-            if execution_blocked:
-                if current_step_row is None:
-                    current_step_row = row_index
-                    row_statuses[row_index] = "current"
-                    step_details[row_index] = tr(
-                        "execution.current_blocked_here",
-                        step=row_index + 1,
-                    )
-                else:
-                    row_statuses[row_index] = "pending"
-                    step_details[row_index] = tr(
-                        "execution.pending_blocked",
-                        step=row_index + 1,
-                    )
-                continue
-
-            if isinstance(step, SendMessageStep):
-                if step.message is None or step.message.msg_id is None:
-                    step_details[row_index] = tr("execution.no_message_selected")
-                    continue
-
-                expected_direction = "tx"
-                expected_category = step.message.category
-                expected_category_label = category_short(expected_category)
-                expected_msg_id = step.message.msg_id
-                # Two things legitimately send a command: the board, when the capture came from
-                # its serial log, and this application, when the run went out over CAN from here.
-                # `host` was missing, so every live run flagged its own sends as suspicious.
-                expected_sources = {"board", HOST_SOURCE, ""}
-
-            else:
-                if step.expected is None or step.expected.msg_id is None:
-                    step_details[row_index] = tr("execution.no_expected_ts", category=category_short("TS"))
-                    continue
-
-                expected_direction = "rx"
-                expected_category = step.expected.category
-                expected_category_label = category_short(expected_category)
-                expected_msg_id = step.expected.msg_id
-                expected_sources = {"detector", ""}
-
-            match_index = self._find_matching_log_record(
-                log_records=log_records,
-                used_indices=used_indices,
-                start_index=search_start,
-                direction=expected_direction,
-                category=expected_category,
-                msg_id=expected_msg_id,
-            )
-
-            if match_index is None:
-                next_log = None
-                for i in range(search_start, len(log_records)):
-                    # The board's own log output is not traffic the scenario predicted, so it can
-                    # neither be the mismatch that blocks a run nor the thing a step waited for.
-                    if i not in used_indices and not log_records[i].is_board_log:
-                        next_log = (i, log_records[i])
-                        break
-
-                if next_log is None:
-                    row_statuses[row_index] = "current"
-                    if isinstance(step, SendMessageStep):
-                        step_details[row_index] = tr(
-                            "execution.current_waiting_send",
-                            step=row_index + 1,
-                            direction=tr(f"log.direction.{expected_direction}"),
-                            category=expected_category_label,
-                            msg_id=expected_msg_id,
-                        )
-                    else:
-                        step_details[row_index] = tr(
-                            "execution.current_waiting_ts",
-                            step=row_index + 1,
-                            direction=tr(f"log.direction.{expected_direction}"),
-                            category=expected_category_label,
-                            msg_id=expected_msg_id,
-                        )
-                    current_step_row = row_index
-                    execution_blocked = True
-                    continue
-
-                next_log_index, next_record = next_log
-                row_statuses[row_index] = "error"
-                step_details[row_index] = tr(
-                    "execution.first_mismatch",
-                    step=row_index + 1,
-                    direction=tr(f"log.direction.{expected_direction}"),
-                    category=expected_category_label,
-                    msg_id=expected_msg_id,
-                    log_row=next_log_index + 1,
-                    got_direction=tr(f"log.direction.{next_record.direction}"),
-                    got_category=category_short(next_record.category),
-                    got_msg_id=next_record.msg_id,
-                    source=normalize_log_source(next_record.source) or tr("log.source.empty"),
-                    time=next_record.timestamp_ms,
-                )
-                current_step_row = row_index
-                first_mismatch_row = row_index
-                execution_blocked = True
-                continue
-
-            for i in range(search_start, match_index):
-                if i not in used_indices and not log_records[i].is_board_log:
-                    extra = log_records[i]
-                    log_details[i] = tr(
-                        "execution.extra_before_step",
-                        step=row_index + 1,
-                        log_row=i + 1,
-                        direction=tr(f"log.direction.{extra.direction}"),
-                        category=category_short(extra.category),
-                        msg_id=extra.msg_id,
-                        source=normalize_log_source(extra.source) or tr("log.source.empty"),
-                        time=extra.timestamp_ms,
-                    )
-
-            used_indices.add(match_index)
-            search_start = match_index + 1
-
-            step_to_log[row_index] = match_index
-            log_to_step[match_index] = row_index
-
-            record = log_records[match_index]
-            record_source = normalize_log_source(record.source)
-
-            if record_source in expected_sources:
-                row_statuses[row_index] = "ok"
-                if isinstance(step, SendMessageStep):
-                    step_details[row_index] = tr(
-                        "execution.matched_send",
-                        step=row_index + 1,
-                        log_row=match_index + 1,
-                        direction=tr(f"log.direction.{record.direction}"),
-                        category=category_short(record.category),
-                        msg_id=record.msg_id,
-                        source=record_source or tr("log.source.empty"),
-                        time=record.timestamp_ms,
-                    )
-                    log_details[match_index] = tr(
-                        "execution.matched_to_step",
-                        step=row_index + 1,
-                        category=expected_category_label,
-                        msg_id=expected_msg_id,
-                    )
-                else:
-                    step_details[row_index] = tr(
-                        "execution.matched_wait_ts",
-                        step=row_index + 1,
-                        log_row=match_index + 1,
-                        direction=tr(f"log.direction.{record.direction}"),
-                        category=category_short(record.category),
-                        msg_id=record.msg_id,
-                        source=record_source or tr("log.source.empty"),
-                        time=record.timestamp_ms,
-                    )
-                    log_details[match_index] = tr(
-                        "execution.matched_to_wait_ts",
-                        step=row_index + 1,
-                        category=expected_category_label,
-                        msg_id=expected_msg_id,
-                    )
-            else:
-                row_statuses[row_index] = "warning"
-                # Remembered as a row number rather than recognised later from the sentence: the
-                # detail is translated, so the English-text check only ever fired in English.
-                self._log_source_problem_rows.add(match_index)
-                step_details[row_index] = tr(
-                    "execution.source_unusual_step",
-                    step=row_index + 1,
-                    log_row=match_index + 1,
-                    source=record_source or tr("log.source.empty"),
-                    expected=sorted(expected_sources),
-                )
-                log_details[match_index] = tr(
-                    "execution.source_unusual_log",
-                    step=row_index + 1,
-                )
-
-        if current_step_row is not None:
-            self._mark_pending_after(row_statuses, step_details, current_step_row + 1)
-
-        for i, rec in enumerate(log_records):
-            rec_source = normalize_log_source(rec.source)
-            if i in log_details:
-                continue
-
-            if rec.is_board_log:
-                log_details[i] = tr(
-                    "execution.board_log",
-                    log_row=i + 1,
-                    msg_id=rec.msg_id,
-                    time=rec.timestamp_ms,
-                )
-                continue
-
-            log_details[i] = tr(
-                "execution.unmatched_log",
-                log_row=i + 1,
-                direction=tr(f"log.direction.{rec.direction}"),
-                category=category_short(rec.category),
-                msg_id=rec.msg_id,
-                source=rec_source or tr("log.source.empty"),
-                time=rec.timestamp_ms,
-            )
-
-        return (
-            row_statuses,
-            step_to_log,
-            log_to_step,
-            step_details,
-            log_details,
-            current_step_row,
-            first_mismatch_row,
-        )
-
-    def _find_matching_log_record(
-            self,
-            log_records: list[LogRecord],
-            used_indices: set[int],
-            start_index: int,
-            direction: str,
-            category: str,
-            msg_id: int,
-    ) -> int | None:
-        for i in range(start_index, len(log_records)):
-            if i in used_indices:
-                continue
-
-            rec = log_records[i]
-            if rec.direction != direction:
-                continue
-            if rec.category != category:
-                continue
-            if rec.msg_id != msg_id:
-                continue
-
-            return i
-
-        return None
+        correlation = correlate(self.document.steps, log_records, live=self._is_live_running())
+        self._correlation = correlation
+        self._log_source_problem_rows = set(correlation.source_problem_rows)
+        return correlation.as_tuple()
 
     def _merge_row_statuses(
             self,
@@ -1783,6 +1497,10 @@ class MainWindow(QMainWindow):
 
         for row_index, status in analyzer_statuses.items():
             current = merged.get(row_index, "neutral")
+            if current == "ok" and status == "warning":
+                # The log shows the step worked. An authoring warning ("no wait step for the
+                # acknowledgement") stays in the warnings panel; it does not repaint a success.
+                continue
             if priority[status] >= priority[current]:
                 merged[row_index] = status
 
@@ -1795,14 +1513,22 @@ class MainWindow(QMainWindow):
             current_step_row: int | None,
             first_mismatch_row: int | None,
     ) -> str:
-        total_steps = len(self.document.steps)
+        # A pause or a comment has nothing to find in a log; counting it made a clean run read
+        # as "1 step unmatched".
+        total_steps = sum(
+            1
+            for step in self.document.steps
+            if isinstance(step, (SendMessageStep, WaitForTsStep)) and getattr(step, "enabled", True)
+        )
         matched_steps = len(step_to_log)
         unmatched_steps = total_steps - matched_steps
 
         # Board log lines are not protocol traffic, so counting them here would report a run as
         # full of unmatched messages purely because the МК was talkative.
         total_logs = sum(1 for rec in self.log_records if not rec.is_board_log)
-        matched_logs = len(log_to_step)
+        # Answers and repeats the scenario did not spell out are accounted for, not extra.
+        explained = self._correlation.explained_rows if self._correlation else set(log_to_step)
+        matched_logs = len(explained)
         unmatched_logs = total_logs - matched_logs
 
         if current_step_row is None:
@@ -1840,6 +1566,7 @@ class MainWindow(QMainWindow):
         self._fill_warnings_width()
 
         analyzer_statuses = self._build_row_statuses(diagnostics)
+        self._analyzer_statuses = analyzer_statuses
         (
             log_statuses,
             step_to_log,
@@ -1852,17 +1579,24 @@ class MainWindow(QMainWindow):
 
         self._step_to_log_row = step_to_log
         self._log_to_step_row = log_to_step
-        self._step_execution_details = step_details
         self._log_execution_details = log_details
 
-        row_statuses = self._merge_row_statuses(analyzer_statuses, log_statuses)
+        if self._run_statuses:
+            # A run is the authority on its own steps; the log only fills in the explanations.
+            row_statuses = self._run_row_statuses()
+            step_details = {**step_details, **self._run_details}
+        else:
+            row_statuses = self._merge_row_statuses(analyzer_statuses, log_statuses)
+        self._step_execution_details = step_details
+
         self.table_model.set_row_statuses(row_statuses)
+        self.table_model.set_row_details(step_details)
         self.timeline_panel.set_document(self.document, row_statuses=row_statuses)
 
         problem_rows = self._collect_log_problem_rows(self.log_records, log_to_step)
 
         self.log_panel.update_annotations(
-            matched_rows=set(log_to_step.keys()),
+            matched_rows=self._correlation.explained_rows if self._correlation else set(),
             problem_rows=problem_rows,
             row_tooltips=log_details,
         )

@@ -5,6 +5,10 @@ Storing the packets is off by default — a full bank is hundreds of megabytes.
 
 The stream arrives over USB, not CAN, so this panel reads a serial port (the FTDI bridge on the
 control board, `/dev/ttyUSB0` on Linux) or replays a captured file — never the command bus.
+
+With the FTDI log backend the board's text shares that port with the packets. Whatever arrives
+between packets and reads as text is handed on as board log lines (`log_records_found`), so
+reading the science data does not mean going deaf to the board's log.
 """
 
 from __future__ import annotations
@@ -27,7 +31,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from detector_scenario_tool.domain.log_roles import BOARD_SOURCE
 from detector_scenario_tool.i18n import tr
+from detector_scenario_tool.logs.text_lines import TextLineSplitter
+from detector_scenario_tool.storage.log_io import record_from_line
 from detector_scenario_tool.services.packet_serial_reader import (
     DEFAULT_BAUDRATE,
     DEFAULT_PORT,
@@ -42,10 +49,13 @@ READ_CHUNK = 1 << 20
 
 class PacketsPanel(QWidget):
     storage_changed = Signal(bool, str)
+    #: Board text found between packets on a live port, as `LogRecord`s.
+    log_records_found = Signal(list)
 
     def __init__(self) -> None:
         super().__init__()
         self.stream = PacketStream()
+        self._text_lines = TextLineSplitter()
         self._expected_packets: int | None = None
 
         self.reader = PacketSerialReader()
@@ -56,7 +66,7 @@ class PacketsPanel(QWidget):
         self.baud_combo = QComboBox()
         self.baud_combo.setEditable(True)
         self.baud_combo.addItems(
-            ["115200", "230400", "460800", "921600", "1000000", "3000000"]
+            ["115200", "230400", "460800", "921600", "1000000", "1500000", "2000000", "3000000"]
         )
         self.baud_combo.setCurrentText(str(DEFAULT_BAUDRATE))
 
@@ -145,7 +155,7 @@ class PacketsPanel(QWidget):
 
         self.start_button.clicked.connect(self.start_reading)
         self.stop_button.clicked.connect(self.stop_reading)
-        self.reader.data_received.connect(self.feed)
+        self.reader.data_received.connect(self.feed_live)
         self.reader.status_changed.connect(self.serial_status_label.setText)
         self.reader.error_occurred.connect(self._on_reader_error)
 
@@ -162,6 +172,27 @@ class PacketsPanel(QWidget):
 
     def feed(self, data: bytes) -> None:
         self.stream.feed(data)
+        self.refresh()
+
+    def feed_live(self, data: bytes) -> None:
+        """Bytes from the port: packets to the counters, text in between to the log."""
+        interstitial: list[bytes] = []
+        self.stream.on_interstitial = interstitial.append
+        try:
+            self.stream.feed(data)
+        finally:
+            self.stream.on_interstitial = None
+
+        lines = self._text_lines.feed(b"".join(interstitial))
+        lines.extend(self._text_lines.flush())
+        now = self._text_lines.now_ms()
+        records = [
+            record
+            for record in (record_from_line(line, now, BOARD_SOURCE) for line in lines)
+            if record is not None
+        ]
+        if records:
+            self.log_records_found.emit(records)
         self.refresh()
 
     def start_reading(self) -> bool:
@@ -207,6 +238,7 @@ class PacketsPanel(QWidget):
 
     def clear(self) -> None:
         self.stream.reset()
+        self._text_lines.reset()
         self._expected_packets = None
         self.refresh()
 

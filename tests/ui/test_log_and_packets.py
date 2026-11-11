@@ -131,21 +131,92 @@ class TestViewModes:
 
         assert model.data(model.index(2, 4)) == "CRC error"
 
-    def test_the_detail_pane_decodes_the_selected_row(self, window):
+    def test_the_decode_is_the_rows_tooltip(self, window):
+        """The fixed pane under the table is gone; hovering a row shows the same decode."""
         window.log_panel.set_records(_records())
-        window.log_panel.table.selectRow(1)
-        window.log_panel._update_detail()
+        model = window.log_panel.model
 
-        text = window.log_panel.detail_view.toPlainText()
+        text = model.data(model.index(1, 0), Qt.ItemDataRole.ToolTipRole)
         assert "TM_ACK" in text
         assert "§4.2" in text
 
-    def test_the_detail_pane_explains_a_broken_frame(self, window):
+    def test_the_tooltip_explains_a_broken_frame(self, window):
         window.log_panel.set_records(_records())
-        window.log_panel.table.selectRow(2)
-        window.log_panel._update_detail()
+        model = window.log_panel.model
 
-        assert "CRC error" in window.log_panel.detail_view.toPlainText()
+        assert "CRC error" in model.data(model.index(2, 3), Qt.ItemDataRole.ToolTipRole)
+
+    def test_the_tooltip_also_says_how_the_row_relates_to_the_scenario(self, window):
+        window.log_panel.set_records(_records())
+        window.log_panel.update_annotations(
+            matched_rows={1}, problem_rows=set(), row_tooltips={1: "answers step #1"}
+        )
+        model = window.log_panel.model
+
+        assert model.data(model.index(1, 0), Qt.ItemDataRole.ToolTipRole).endswith(
+            "answers step #1"
+        )
+
+    def test_there_is_no_detail_pane(self, window):
+        assert not hasattr(window.log_panel, "detail_view")
+
+    def test_a_row_outside_the_scenario_is_not_painted_red(self, window):
+        window.log_panel.set_records(_records())
+        window.log_panel.update_annotations(matched_rows=set(), problem_rows=set(), row_tooltips={})
+        model = window.log_panel.model
+
+        # Outside the scenario is dimmed text on the normal background, never a failure colour.
+        assert model.data(model.index(1, 0), Qt.ItemDataRole.BackgroundRole) is None
+
+
+class TestTextView:
+    def _text_mode(self, window):
+        from detector_scenario_tool.ui.models.log_table_model import VIEW_TEXT
+
+        window.log_panel.set_view_mode(VIEW_TEXT)
+        return window.log_panel
+
+    def test_it_is_offered_next_to_raw_and_decoded(self, window):
+        from detector_scenario_tool.ui.models.log_table_model import VIEW_TEXT
+
+        combo = window.log_panel.view_mode_combo
+        assert [combo.itemData(i) for i in range(combo.count())] == [VIEW_DECODED, VIEW_RAW, VIEW_TEXT]
+
+    def test_every_record_is_a_line(self, window):
+        panel = self._text_mode(window)
+        panel.set_records(_records())
+
+        lines = panel.text_view_text().splitlines()
+        assert len(lines) == 3
+        assert f"0x{STATUS_REQ:04X}" in lines[0]
+        assert "CRC error" in lines[2]
+        assert panel.views.currentWidget() is panel.text_view
+
+    def test_board_text_reads_as_text(self, window):
+        from detector_scenario_tool.domain.logs import text_log_record
+
+        panel = self._text_mode(window)
+        panel.set_records([text_log_record(b"STATE IDLE -> DUTY\r\n", 5)])
+
+        assert panel.text_view_text().rstrip().endswith("STATE IDLE -> DUTY")
+
+    def test_new_records_are_appended_not_redrawn(self, window):
+        panel = self._text_mode(window)
+        records = _records()
+        panel.set_records(records[:2])
+        first_block = panel.text_view.document().firstBlock()
+
+        panel.set_records(records)
+
+        assert len(panel.text_view_text().splitlines()) == 3
+        assert panel.text_view.document().firstBlock() == first_block
+
+    def test_filters_apply(self, window):
+        panel = self._text_mode(window)
+        panel.set_records(_records())
+        panel.dir_filter.setCurrentIndex(panel.dir_filter.findData("tx"))
+
+        assert len(panel.text_view_text().splitlines()) == 1
 
 
 class TestPacketsPanel:
@@ -277,3 +348,20 @@ class TestExpectedCount:
             runner.tick()
 
         assert window.packets_panel._expected_packets is None
+
+
+class TestFtdiTextReachesTheLog:
+    def test_text_between_packets_lands_in_the_log(self, window):
+        window.packets_panel.feed_live(
+            b"dump start\r\n" + build_packet(3, 0, b"") + b"dump done\r\n"
+        )
+        window._apply_live_refresh()
+
+        texts = [r.payload for r in window.log_records]
+        assert texts == [b"dump start", b"dump done"]
+        assert window.packets_panel.received_label.text() == "1"
+
+    def test_a_packet_never_becomes_log_rows(self, window):
+        window.packets_panel.feed_live(b"".join(build_packet(3, n, bytes(range(200))) for n in range(3)))
+
+        assert window.log_records == []

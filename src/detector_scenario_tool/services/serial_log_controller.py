@@ -1,8 +1,24 @@
+"""Live capture of the board's serial output: LPUART1, USART2 or the FTDI bridge.
+
+Every line is kept. A `DSTLOG|` line becomes the protocol record it describes; anything else is
+the board's own text — `STATE IDLE -> DUTY`, a driver's bring-up report — and becomes a `LOG`
+record, exactly as the same text does when the firmware prints it onto CAN. Until this, every
+line that was not `DSTLOG` was silently dropped, which on the LPUART and FTDI backends was all
+of them.
+
+Binary data is the exception: the FTDI port carries science packets in DUMP, and those are the
+packet monitor's business. Such lines are counted and reported, not logged.
+"""
+
 from __future__ import annotations
+
+import time
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from detector_scenario_tool.storage.log_io import LogLoadError, parse_log_line
+from detector_scenario_tool.domain.log_roles import BOARD_SOURCE
+from detector_scenario_tool.logs.text_lines import TextLineSplitter
+from detector_scenario_tool.storage.log_io import record_from_line
 from detector_scenario_tool.i18n import tr
 
 try:
@@ -22,6 +38,7 @@ class SerialLogController(QObject):
             baudrate: int = 115200,
             poll_interval_ms: int = 30,
             reconnect_delay_ms: int = 1500,
+            clock=None,
     ) -> None:
         super().__init__()
         self.port = port
@@ -29,8 +46,12 @@ class SerialLogController(QObject):
         self.poll_interval_ms = poll_interval_ms
         self.reconnect_delay_ms = reconnect_delay_ms
 
+        #: Same clock as the CAN reader (`time.monotonic`), so text from this port and frames
+        #: from the bus interleave by time in one log.
+        self._clock = clock or (lambda: time.monotonic() * 1000.0)
         self._serial = None
-        self._buffer = bytearray()
+        self._lines = TextLineSplitter(clock=self._clock)
+        self.binary_bytes_skipped = 0
 
         self._desired_running = False
         self._paused = False
@@ -55,7 +76,7 @@ class SerialLogController(QObject):
         self._reconnect_timer.stop()
         self._close_serial()
 
-        self._buffer.clear()
+        self._lines.reset()
         self.status_changed.emit(tr("serial.status.disconnected", port=self.port))
 
     def pause(self) -> None:
@@ -102,7 +123,7 @@ class SerialLogController(QObject):
             self._schedule_reconnect()
             return
 
-        self._buffer.clear()
+        self._lines.reset()
         self._timer.start(self.poll_interval_ms)
         self.status_changed.emit(
             tr("serial.status.connected", port=self.port, baudrate=self.baudrate)
@@ -141,41 +162,31 @@ class SerialLogController(QObject):
 
         try:
             waiting = getattr(self._serial, "in_waiting", 0) or 0
-            if waiting <= 0:
-                return
-
-            chunk = self._serial.read(waiting)
-            if not chunk:
-                return
-
-            self._buffer.extend(chunk)
-            self._drain_lines()
-
+            chunk = self._serial.read(waiting) if waiting > 0 else b""
         except Exception as exc:
             self._handle_disconnect(
                 tr("serial.error.read_failed", port=self.port, error=str(exc))
             )
+            return
 
-    def _drain_lines(self) -> None:
-        while True:
-            newline_pos = self._buffer.find(b"\n")
-            if newline_pos < 0:
-                break
+        self.feed(chunk)
 
-            raw = self._buffer[:newline_pos]
-            del self._buffer[: newline_pos + 1]
+    def feed(self, chunk: bytes) -> None:
+        """Bytes from the port. Public so tests can drive it without a serial device."""
+        lines = self._lines.feed(chunk) if chunk else []
+        # A number printed with no newline after it still has to come out eventually.
+        lines.extend(self._lines.flush())
+        for line in lines:
+            self._emit_line(line)
 
-            line = raw.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-
-            try:
-                record = parse_log_line(line)
-            except LogLoadError as exc:
-                self.error_occurred.emit(f"{self.port}: {exc}")
-                continue
-
-            if record is None:
-                continue
-
+    def _emit_line(self, line: bytes) -> None:
+        record = record_from_line(line, int(self._clock()), source=BOARD_SOURCE)
+        if record is not None:
             self.record_received.emit(record)
+            return
+
+        if line.strip():
+            self.binary_bytes_skipped += len(line)
+            self.status_changed.emit(
+                tr("serial.status.binary_skipped", port=self.port, count=self.binary_bytes_skipped)
+            )

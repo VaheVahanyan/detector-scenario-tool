@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from detector_scenario_tool.domain.logs import LOG_CATEGORY, LogRecord
+from detector_scenario_tool.domain.logs import (
+    LOG_CATEGORY,
+    LogRecord,
+    is_clean_text,
+    text_log_record,
+)
 
 
 #: Written by this version; older files are still accepted.
@@ -19,8 +24,14 @@ class LogLoadError(ValueError):
     pass
 
 
-def load_log_records(path: str | Path) -> list[LogRecord]:
-    text = Path(path).read_text(encoding="utf-8").strip()
+def load_log_records(path: str | Path, keep_text: bool = False) -> list[LogRecord]:
+    """Read a saved log.
+
+    With `keep_text`, nothing in the file is lost: a line that is not `DSTLOG` is the board's own
+    output (a terminal capture of LPUART or FTDI mixes the two), and a `DSTLOG` line that cannot be
+    read is kept as text with the reason attached instead of failing the whole import.
+    """
+    text = Path(path).read_text(encoding="utf-8", errors="replace").strip()
 
     if not text:
         return []
@@ -28,18 +39,53 @@ def load_log_records(path: str | Path) -> list[LogRecord]:
     if text.startswith("["):
         return _load_json_records(text)
 
-    return parse_log_text(text)
+    return parse_log_text(text, keep_text=keep_text)
 
 
-def parse_log_text(text: str) -> list[LogRecord]:
+def parse_log_text(text: str, keep_text: bool = False) -> list[LogRecord]:
     result: list[LogRecord] = []
+    #: A text line has no time of its own; it inherits the last one seen, which keeps the order.
+    last_ts = 0
 
     for line_no, raw_line in enumerate(text.splitlines(), start=1):
-        record = parse_log_line(raw_line, line_no=line_no)
+        if not keep_text:
+            record = parse_log_line(raw_line, line_no=line_no)
+        else:
+            record = record_from_line(raw_line.encode("utf-8"), last_ts, line_no=line_no)
         if record is not None:
+            if not record.is_text_only:
+                last_ts = record.timestamp_ms
             result.append(record)
 
     return result
+
+
+def record_from_line(
+        raw: bytes,
+        timestamp_ms: int,
+        source: str = "board",
+        line_no: int = 1,
+) -> LogRecord | None:
+    """Whatever a line of the board's serial output is: a `DSTLOG` record, or text.
+
+    Returns None for an empty line and for one that is not text at all — the FTDI port carries
+    binary science data too, and turning that into log rows would bury the real ones.
+    """
+    # Trailing padding and terminators go; leading spaces are the board's own indentation.
+    stripped = raw.rstrip(b"\x00\r\n\t ")
+    if not stripped.strip():
+        return None
+
+    if stripped.lstrip().startswith(b"DSTLOG|"):
+        try:
+            return parse_log_line(stripped.decode("utf-8", errors="replace"), line_no=line_no)
+        except LogLoadError as exc:
+            # Still the board talking, just not in a form this version can place.
+            return text_log_record(stripped, timestamp_ms, source=source, note=str(exc))
+
+    if not is_clean_text(stripped):
+        return None
+    return text_log_record(stripped, timestamp_ms, source=source)
 
 
 def parse_log_line(raw_line: str, line_no: int = 1) -> LogRecord | None:

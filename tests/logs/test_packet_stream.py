@@ -262,3 +262,35 @@ class TestCrcVariants:
         """When this starts failing, B2 has been answered — wire it up and delete this test."""
         assert crc16.NI_PACKET_CRC is None
         assert crc16.compute_ni_crc(b"abc") is None
+
+
+class TestTextBetweenPackets:
+    """FTDI log backend: the board's text shares the port with the science packets."""
+
+    def test_bytes_between_packets_are_handed_on_in_order(self):
+        seen = []
+        stream = PacketStream(on_interstitial=seen.append)
+        raw = b"before\r\n" + build_packet(1, 0, b"") + b"between\r\n" + build_packet(1, 1, b"")
+
+        found = stream.feed(raw)
+
+        assert [p.number for p in found] == [0, 1]
+        assert b"".join(seen) == b"before\r\nbetween\r\n"
+
+    def test_the_tail_of_a_text_line_is_not_held_back(self):
+        """Holding a fixed five bytes "in case it is a marker" sat on the end of every line."""
+        seen = []
+        stream = PacketStream(on_interstitial=seen.append)
+
+        stream.feed(b"STATE IDLE -> DUTY\r\n")
+
+        assert b"".join(seen) == b"STATE IDLE -> DUTY\r\n"
+
+    def test_a_split_marker_is_still_held(self):
+        seen = []
+        stream = PacketStream(on_interstitial=seen.append)
+        packet = build_packet(1, 0, b"")
+
+        assert stream.feed(b"x" + packet[:2]) == []
+        assert b"".join(seen) == b"x"
+        assert [p.number for p in stream.feed(packet[2:])] == [0]

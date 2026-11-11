@@ -12,7 +12,7 @@ import pytest
 from detector_scenario_tool.domain.logs import LOG_CATEGORY, LogRecord
 from detector_scenario_tool.i18n import tr
 from detector_scenario_tool.ui.models.log_table_model import VIEW_DECODED
-from message_ids import STATUS_REQ, TM_ACK
+from message_ids import DUTY, STATUS_REQ, TM_ACK
 
 
 @pytest.fixture
@@ -43,17 +43,19 @@ def _board_log(ts: int, text: bytes = b"boot ok\n", msg_id: int = 0x0123) -> Log
     )
 
 
-def _sent(ts: int) -> LogRecord:
+def _sent(ts: int, msg_id: int = STATUS_REQ) -> LogRecord:
     return LogRecord(
-        timestamp_ms=ts, direction="tx", category="KU", msg_id=STATUS_REQ,
+        timestamp_ms=ts, direction="tx", category="KU", msg_id=msg_id,
         payload=b"", source="board",
     )
 
 
 def _ack(ts: int) -> LogRecord:
+    """An acceptance of STATUS_REQ (identifier little-endian in bytes 0-1, status 0)."""
     return LogRecord(
         timestamp_ms=ts, direction="rx", category="TS", msg_id=TM_ACK,
-        payload=bytes([0x01, 0x00, 0x00, 0xAA, 0xAA, 0xAA]), source="detector",
+        payload=STATUS_REQ.to_bytes(2, "little") + bytes([0x00, 0xAA, 0xAA, 0xAA]),
+        source="detector",
     )
 
 
@@ -78,11 +80,27 @@ class TestCorrelation:
         assert window.table_model._row_statuses.get(0) != "error"
 
     def test_a_genuine_mismatch_is_still_reported(self, window):
-        """The guard rail: skipping log lines must not skip real traffic."""
+        """The guard rail: skipping log lines must not skip real traffic.
+
+        A step is wrong when the log shows the scenario got past it without it — here the second
+        command went out, but the first never did.
+        """
         _add_send(window, STATUS_REQ)
-        _load(window, [_board_log(1), _ack(5)])
+        _add_send(window, DUTY)
+        _load(window, [_board_log(1), _sent(5, DUTY), _board_log(6)])
 
         assert window.table_model._row_statuses.get(0) == "error"
+        assert window.table_model._row_statuses.get(1) == "ok"
+
+    def test_an_answer_with_no_wait_step_is_not_a_mismatch(self, window):
+        """What turned every real run red: the acknowledgement nobody spelled out a wait for."""
+        _add_send(window, STATUS_REQ)
+        _add_send(window, DUTY)
+        _load(window, [_sent(10), _ack(12), _board_log(13)])
+
+        assert window.table_model._row_statuses.get(0) == "ok"
+        assert window.table_model._row_statuses.get(1) != "error"
+        assert window._collect_log_problem_rows(window.log_records, window._log_to_step_row) == set()
 
     def test_log_lines_are_not_counted_as_problems(self, window):
         _add_send(window, STATUS_REQ)

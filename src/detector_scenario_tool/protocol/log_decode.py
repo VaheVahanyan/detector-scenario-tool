@@ -93,12 +93,39 @@ def build_log_detail(record: LogRecord) -> str:
     return "\n".join(lines)
 
 
+def build_log_text_line(record: LogRecord) -> str:
+    """One record as a line of running text, for the log panel's text view.
+
+    Board output reads as the terminal would have shown it; a protocol message reads as its name,
+    its one-line summary and its bytes. Time and source lead every line, so the two interleave
+    legibly.
+    """
+    from detector_scenario_tool.utils.labels import category_short, message_label
+
+    head = f"{record.timestamp_ms:>10}  {record.source or '-':<8} {record.direction.upper():<2}"
+
+    if not record.valid:
+        reason = record.note or tr("logs.value.broken")
+        return f"{head} ✗ {reason}  [{record.payload_hex}]"
+
+    if record.category == LOG_CATEGORY:
+        moved = None if record.is_text_only else _legacy_label(record.msg_id)
+        if moved is None and looks_like_text(record.payload):
+            return f"{head} │ {log_text_line(record.payload)}"
+        return f"{head} │ {category_short(LOG_CATEGORY)}: {build_log_summary(record)}  [{record.payload_hex}]"
+
+    label = message_label(record.category, record.msg_id)
+    summary = build_log_summary(record)
+    hex_part = f"  [{record.payload_hex}]" if record.payload else ""
+    return f"{head} {label} — {summary}{hex_part}"
+
+
 # --------------------------------------------------------------------------------------
 # The board's own output
 # --------------------------------------------------------------------------------------
 
 def _summarise_board_log(record: LogRecord) -> str:
-    moved = _legacy_label(record.msg_id)
+    moved = None if record.is_text_only else _legacy_label(record.msg_id)
     if moved is not None:
         # Not board output at all: firmware a revision behind, answering under its old numbers.
         return tr("logdecode.legacy_v2", label=moved)
@@ -110,7 +137,7 @@ def _summarise_board_log(record: LogRecord) -> str:
 
 
 def _detail_board_log(record: LogRecord) -> str:
-    moved = _legacy_label(record.msg_id)
+    moved = None if record.is_text_only else _legacy_label(record.msg_id)
     if moved is not None:
         return "\n".join([
             tr("logdecode.legacy_v2", label=moved),
@@ -120,7 +147,12 @@ def _detail_board_log(record: LogRecord) -> str:
             record.payload_hex,
         ])
 
-    lines = [tr("logdecode.board_log.title", msg=f"0x{record.msg_id:04X}"), ""]
+    if record.is_text_only:
+        lines = [tr("logdecode.board_log.title_text"), ""]
+    else:
+        lines = [tr("logdecode.board_log.title", msg=f"0x{record.msg_id:04X}"), ""]
+    if record.note:
+        lines.extend([record.note, ""])
 
     if looks_like_text(record.payload):
         lines.append(decode_log_text(record.payload))

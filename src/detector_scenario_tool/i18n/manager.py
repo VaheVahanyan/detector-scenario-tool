@@ -206,6 +206,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "packets.value.not_checked": "не проверяется",
         "logs.view_mode.decoded": "С расшифровкой",
         "logs.view_mode.raw": "Raw",
+        "logs.view_mode.text": "Текстом",
         "logs.column.can_id": "CAN ID",
         "logs.column.frames": "Кадров",
         "logs.column.bytes": "Байты",
@@ -280,7 +281,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
             "Сопоставлено шагов: {matched_steps}/{total_steps} | "
             "Несопоставлено шагов: {unmatched_steps} | "
             "Сопоставлено логов: {matched_logs}/{total_logs} | "
-            "Лишних логов: {unmatched_logs}"
+            "Вне сценария: {unmatched_logs}"
         ),
         "summary.current.none": "нет",
         "summary.current.step": "#{step}",
@@ -317,7 +318,15 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
 
         "execution.first_mismatch": "Первое расхождение на шаге #{step}: ожидалось {direction} {category} 0x{msg_id:04X}, но следующий несопоставленный лог #{log_row}: {got_direction} {got_category} 0x{got_msg_id:04X} от {source} в {time} мс.",
         "execution.extra_before_step": "Лишний лог перед шагом #{step}: лог #{log_row} = {direction} {category} 0x{msg_id:04X} от {source} в {time} мс.",
-        "execution.unmatched_log": "Лог #{log_row} лишний: {direction} {category} 0x{msg_id:04X}, источник={source}, время={time} мс.",
+        "execution.unmatched_log": "Лог #{log_row} вне сценария: {direction} {category} 0x{msg_id:04X}, источник={source}, время={time} мс. Сценарий этого сообщения не ждёт — это не ошибка.",
+        "execution.step_missing": "Шаг #{step} пропущен: {category} 0x{msg_id:04X} в логе не найдено, хотя следующие команды сценария уже есть в логе.",
+        "execution.ack_rejected_step": "Шаг #{step}: команда отклонена — квитанция в логе #{log_row}, код: {code}.",
+        "execution.repeat_of_step": "Повтор команды шага #{step} ({category} 0x{msg_id:04X}): циклическая отправка или повторная попытка.",
+        "execution.response_to_step": "Квитанция на команду шага #{step}: {verdict}.",
+        "execution.ack_verdict_accepted": "принята",
+        "execution.ack_verdict_rejected": "отклонена ({code})",
+        "execution.follow_up_of_step": "Ответ на команду шага #{step}: {category} 0x{msg_id:04X}, предусмотренный протоколом.",
+        "execution.board_log_text": "Лог #{log_row}: текстовый вывод платы ({time} мс). Это не ответ НА — в сопоставлении со сценарием не участвует.",
         "execution.board_log": "Лог #{log_row}: отладочный вывод платы (идентификатор 0x{msg_id:04X}, {time} мс). Это не ответ НА — в сопоставлении со сценарием не участвует.",
 
         "log.direction.tx": "TX",
@@ -337,6 +346,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
 
         "serial.status.connected": "подключено: {port} @ {baudrate}",
         "serial.status.disconnected": "отключено: {port}",
+        "serial.status.binary_skipped": "{port}: пропущено {count} байт двоичных данных (не текст — научные пакеты читаются во вкладке «Пакеты»)",
         "serial.status.paused": "пауза: {port}",
         "serial.status.resumed": "продолжено: {port}",
         "serial.status.reconnecting": "переподключение: {port}",
@@ -768,6 +778,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "packets.value.not_checked": "not checked",
         "logs.view_mode.decoded": "Decoded",
         "logs.view_mode.raw": "Raw",
+        "logs.view_mode.text": "Text",
         "logs.column.can_id": "CAN ID",
         "logs.column.frames": "Frames",
         "logs.column.bytes": "Bytes",
@@ -842,7 +853,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
             "Steps matched: {matched_steps}/{total_steps} | "
             "Unmatched steps: {unmatched_steps} | "
             "Logs matched: {matched_logs}/{total_logs} | "
-            "Unmatched logs: {unmatched_logs}"
+            "Outside scenario: {unmatched_logs}"
         ),
         "summary.current.none": "none",
         "summary.current.step": "#{step}",
@@ -878,7 +889,15 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
 
         "execution.first_mismatch": "First mismatch at step #{step}: expected {direction} {category} 0x{msg_id:04X}, but next unmatched log row #{log_row} is {got_direction} {got_category} 0x{got_msg_id:04X} from {source} at {time} ms.",
         "execution.extra_before_step": "Unexpected extra log before step #{step}: log row #{log_row} = {direction} {category} 0x{msg_id:04X} from {source} at {time} ms.",
-        "execution.unmatched_log": "Log row #{log_row} is unmatched: {direction} {category} 0x{msg_id:04X}, source={source}, time={time} ms.",
+        "execution.unmatched_log": "Log row #{log_row} is outside the scenario: {direction} {category} 0x{msg_id:04X}, source={source}, time={time} ms. The scenario does not wait for it — this is not an error.",
+        "execution.step_missing": "Step #{step} was skipped: {category} 0x{msg_id:04X} is not in the log, although later commands of the scenario are.",
+        "execution.ack_rejected_step": "Step #{step}: the command was rejected — acknowledgement at log row #{log_row}, code: {code}.",
+        "execution.repeat_of_step": "Repeat of the command of step #{step} ({category} 0x{msg_id:04X}): a cyclic send or a retry.",
+        "execution.response_to_step": "Acknowledgement of the command of step #{step}: {verdict}.",
+        "execution.ack_verdict_accepted": "accepted",
+        "execution.ack_verdict_rejected": "rejected ({code})",
+        "execution.follow_up_of_step": "Answer to the command of step #{step}: {category} 0x{msg_id:04X}, as the protocol specifies.",
+        "execution.board_log_text": "Log row #{log_row}: board text output ({time} ms). Not an answer from the payload — it takes no part in matching.",
         "execution.board_log": "Log row #{log_row}: board debug output (identifier 0x{msg_id:04X}, {time} ms). Not an answer from the payload — it takes no part in matching.",
 
         "log.direction.tx": "TX",
@@ -898,6 +917,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
 
         "serial.status.connected": "connected: {port} @ {baudrate}",
         "serial.status.disconnected": "disconnected: {port}",
+        "serial.status.binary_skipped": "{port}: skipped {count} bytes of binary data (not text — science packets are read on the Packets tab)",
         "serial.status.paused": "paused: {port}",
         "serial.status.resumed": "resumed: {port}",
         "serial.status.reconnecting": "reconnecting: {port}",

@@ -272,6 +272,7 @@ RU: dict[str, str] = {
     # -- log decoding --------------------------------------------------------------------
     "logdecode.unknown_message": "Неизвестное сообщение, {length} байт",
     "logdecode.board_log.title": "Отладочный вывод платы, идентификатор {msg}",
+    "logdecode.board_log.title_text": "Текстовый вывод платы (последовательный порт или файл)",
     "logdecode.board_log.binary": "Двоичные данные, {length} байт — на текст не похоже",
     "logdecode.legacy_v2": "Нумерация протокола v2: сейчас это {label}",
     "logdecode.legacy_v2.hint": (
@@ -612,6 +613,7 @@ EN: dict[str, str] = {
     # -- log decoding --------------------------------------------------------------------
     "logdecode.unknown_message": "Unknown message, {length} bytes",
     "logdecode.board_log.title": "Board debug output, identifier {msg}",
+    "logdecode.board_log.title_text": "Board text output (serial port or file)",
     "logdecode.board_log.binary": "Binary data, {length} bytes — does not look like text",
     "logdecode.legacy_v2": "Protocol v2 numbering: this is now {label}",
     "logdecode.legacy_v2.hint": (

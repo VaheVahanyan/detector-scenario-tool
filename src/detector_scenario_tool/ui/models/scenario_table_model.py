@@ -33,12 +33,18 @@ class ScenarioTableModel(QAbstractTableModel):
         super().__init__()
         self.document = document
         self._row_statuses: dict[int, str] = {}
+        self._row_details: dict[int, str] = {}
 
     def set_document(self, document: ScenarioDocument) -> None:
         self.beginResetModel()
         self.document = document
         self._row_statuses = {}
+        self._row_details = {}
         self.endResetModel()
+
+    def set_row_details(self, row_details: dict[int, str]) -> None:
+        """Tooltips explaining each row's status. Read on hover, so no repaint is needed."""
+        self._row_details = dict(row_details)
 
     def set_row_statuses(self, row_statuses: dict[int, str]) -> None:
         # Statuses only affect colours, so signal a repaint instead of resetting the model.
@@ -112,8 +118,13 @@ class ScenarioTableModel(QAbstractTableModel):
             if col == 5:
                 return self._step_comment_text(step)
 
-        if role == Qt.ItemDataRole.ToolTipRole and col == 4:
-            return self._step_timeout_tooltip(step)
+        if role == Qt.ItemDataRole.ToolTipRole:
+            # Why the row has its colour: matched to which log row, waiting for what, rejected how.
+            detail = self._row_details.get(row)
+            if col == 4:
+                own = self._step_timeout_tooltip(step)
+                return "\n\n".join(text for text in (own, detail) if text) or None
+            return detail
 
         status = self._row_statuses.get(row, "neutral")
 

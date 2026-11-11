@@ -5,13 +5,26 @@ from PySide6.QtGui import QColor, QBrush
 
 from detector_scenario_tool.domain.logs import LogRecord
 from detector_scenario_tool.protocol.catalog import ProtocolCatalog
-from detector_scenario_tool.utils.labels import message_label
-from detector_scenario_tool.protocol.log_decode import build_log_summary
+from detector_scenario_tool.utils.labels import category_short, message_label
+from detector_scenario_tool.protocol.log_decode import build_log_detail, build_log_summary
 from detector_scenario_tool.i18n import tr
 
 
 VIEW_DECODED = "decoded"
 VIEW_RAW = "raw"
+#: Not a table at all: the log as running text, one line per record (see `LogPanel`).
+VIEW_TEXT = "text"
+
+#: Colours. A record the scenario did not mention is *not* painted as a failure — on a real bench
+#: that is every acknowledgement without a wait step, every repeat and all telemetry. Red is kept
+#: for what is actually broken.
+BROKEN_BACKGROUND = QColor(95, 30, 30)
+PROBLEM_BACKGROUND = QColor(85, 70, 30)
+PROBLEM_FOREGROUND = QColor(255, 240, 190)
+BOARD_LOG_BACKGROUND = QColor(28, 34, 44)
+BOARD_LOG_FOREGROUND = QColor(150, 170, 190)
+#: Outside the scenario: dimmed, so the matched traffic stands out, but not alarming.
+OUTSIDE_FOREGROUND = QColor(160, 160, 160)
 
 #: Column sets per view. Raw shows the wire, decoded shows the meaning.
 HEADERS = {
@@ -34,6 +47,7 @@ HEADERS = {
         "logs.column.payload_hex",
     ],
 }
+HEADERS[VIEW_TEXT] = HEADERS[VIEW_DECODED]
 
 
 class LogTableModel(QAbstractTableModel):
@@ -134,6 +148,9 @@ class LogTableModel(QAbstractTableModel):
     def _headers(self) -> list[str]:
         return HEADERS[self._view_mode]
 
+    def records(self) -> list[LogRecord]:
+        return self._items
+
     def record_at(self, row: int) -> LogRecord | None:
         return self._items[row] if 0 <= row < len(self._items) else None
 
@@ -169,26 +186,25 @@ class LogTableModel(QAbstractTableModel):
 
         if role == Qt.ItemDataRole.BackgroundRole:
             if not item.valid:
-                return QBrush(QColor(95, 30, 30))
-            # The board's own output is expected to be unmatched — it answers nothing — so it must
-            # not be painted like a telemetry message that failed to line up with a step.
-            if item.is_board_log:
-                return QBrush(QColor(28, 34, 44))
-            if row not in self._matched_rows:
-                return QBrush(QColor(80, 35, 35))
+                return QBrush(BROKEN_BACKGROUND)
             if row in self._problem_rows:
-                return QBrush(QColor(85, 70, 30))
+                return QBrush(PROBLEM_BACKGROUND)
+            # The board's own output answers nothing, so being unmatched is its normal state.
+            if item.is_board_log:
+                return QBrush(BOARD_LOG_BACKGROUND)
 
         if role == Qt.ItemDataRole.ForegroundRole:
-            if item.is_board_log:
-                return QBrush(QColor(150, 170, 190))
-            if row not in self._matched_rows:
-                return QBrush(QColor(255, 220, 220))
+            if not item.valid:
+                return None
             if row in self._problem_rows:
-                return QBrush(QColor(255, 240, 190))
+                return QBrush(PROBLEM_FOREGROUND)
+            if item.is_board_log:
+                return QBrush(BOARD_LOG_FOREGROUND)
+            if row not in self._matched_rows:
+                return QBrush(OUTSIDE_FOREGROUND)
 
         if role == Qt.ItemDataRole.ToolTipRole:
-            return self._row_tooltips.get(row)
+            return self.tooltip_for(row)
 
         return None
 
@@ -214,7 +230,33 @@ class LogTableModel(QAbstractTableModel):
             item.payload_hex,
         ][col]
 
+    def tooltip_for(self, row: int) -> str | None:
+        """The field-by-field decode, then how the row relates to the scenario.
+
+        This is where the decode lives now. It used to be a fixed pane under the table that took a
+        large share of the panel to show one row at a time; on hover it costs no space at all.
+        """
+        item = self.record_at(row)
+        if item is None:
+            return None
+
+        if not item.valid:
+            decoded = "\n".join(
+                part for part in (item.note or tr("logs.value.broken"), item.payload_hex) if part
+            )
+        else:
+            try:
+                decoded = build_log_detail(item)
+            except Exception:
+                decoded = item.payload_hex
+
+        relation = self._row_tooltips.get(row)
+        return "\n\n".join(part for part in (decoded, relation) if part) or None
+
     def _message_title(self, item: LogRecord) -> str:
+        if item.is_board_log and item.can_id is None and item.msg_id == 0:
+            # A line read from a serial port has no identifier at all; "0x0000" would be invented.
+            return category_short(item.category)
         return message_label(item.category, item.msg_id)
 
     def _summary(self, item: LogRecord) -> str:

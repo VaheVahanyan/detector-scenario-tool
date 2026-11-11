@@ -55,6 +55,16 @@ class LogRecord:
         """True for the board's own text output, which is never a protocol message."""
         return self.category == LOG_CATEGORY
 
+    @property
+    def is_text_only(self) -> bool:
+        """A line read from a serial port (LPUART, USART2, FTDI): board output with no identifier.
+
+        Such a line carries `msg_id` 0 and no CAN identifier. It must never be looked up as a
+        number — 0x0000 was a control command in protocol v2, and the v2 recogniser would happily
+        call a line of text "firmware a revision behind".
+        """
+        return self.is_board_log and self.can_id is None and self.msg_id == 0
+
 
 def looks_like_text(payload: bytes) -> bool:
     """Whether a payload is worth showing as text at all.
@@ -90,3 +100,39 @@ def decode_log_text(payload: bytes) -> str:
 def log_text_line(payload: bytes) -> str:
     """The same text folded onto one line, for a table cell."""
     return " ".join(decode_log_text(payload).split())
+
+
+#: Share of printable characters a serial line must reach to count as text (`is_clean_text`).
+CLEAN_TEXT_RATIO = 0.95
+
+
+def is_clean_text(payload: bytes) -> bool:
+    """Stricter than `looks_like_text`, for byte streams that may also carry binary data.
+
+    The FTDI port carries the board's log text *and*, in DUMP, the science-data packets; a serial
+    line reader on it sees both. `looks_like_text` counts every byte above 7 bit as text — right
+    for CAN, where a cyrillic line arrives in fragments — but random binary then passes ~88 % of the
+    time. Here the line is whole, so it can be held to strict UTF-8 instead.
+    """
+    data = payload.strip(b"\x00\r\n")
+    if not data:
+        return False
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    printable = sum(1 for ch in text if ch.isprintable() or ch in _KEPT_CONTROLS)
+    return printable / len(text) >= CLEAN_TEXT_RATIO
+
+
+def text_log_record(line: bytes, timestamp_ms: int, source: str = "board", note: str = "") -> LogRecord:
+    """A line of the board's text output, read from a serial port or a file."""
+    return LogRecord(
+        timestamp_ms=timestamp_ms,
+        direction="rx",
+        category=LOG_CATEGORY,
+        msg_id=0,
+        payload=bytes(line).rstrip(b"\r\n"),
+        source=source,
+        note=note,
+    )

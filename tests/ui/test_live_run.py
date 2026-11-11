@@ -271,3 +271,39 @@ class TestOwnSendsAreNotSuspicious:
         statuses, _, _, _, _, _, _ = window._build_log_match_info(window.log_records)
         assert statuses.get(0) == "warning"
         assert window._log_source_problem_rows == {0}
+
+
+class TestARealisticRunIsNotRed:
+    """Answers with no wait step, a pause, board chatter: the bench run that used to turn red."""
+
+    def test_nothing_is_painted_as_a_failure(self, window):
+        from PySide6.QtCore import Qt
+
+        from detector_scenario_tool.domain.logs import text_log_record
+        from detector_scenario_tool.ui.models.log_table_model import BROKEN_BACKGROUND
+
+        _add_send(window, STATUS_REQ)
+        window._add_wait_step()
+        _add_send(window, STATUS_REQ)
+        _connect(window)
+        window._start_run()
+        runner = window.runner
+        runner._clock = lambda: runner_clock[0]
+        runner_clock = [0.0]
+        for _ in range(400):
+            if not runner.state.is_active:
+                break
+            runner_clock[0] += 20
+            runner.tick()
+            window.log_records.append(text_log_record(b"STATE DUTY", int(runner_clock[0])))
+        window._refresh_all_views()
+
+        assert runner.state is RunState.FINISHED
+        statuses = window.table_model._row_statuses
+        assert statuses[0] == "ok" and statuses[2] == "ok"
+        assert window._collect_log_problem_rows(window.log_records, window._log_to_step_row) == set()
+
+        model = window.log_panel.model
+        for row in range(model.rowCount()):
+            brush = model.data(model.index(row, 0), Qt.ItemDataRole.BackgroundRole)
+            assert brush is None or brush.color() != BROKEN_BACKGROUND
